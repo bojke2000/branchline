@@ -77,23 +77,23 @@ fn click_with_modifiers(
 }
 
 #[test]
-fn bmm_defaults_to_the_reference_canvas_even_on_a_dark_host() {
+fn bmm_defaults_to_dark_mode_even_on_a_light_host() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
     let ctx = egui::Context::default();
-    ctx.set_theme(egui::Theme::Dark);
+    ctx.set_theme(egui::Theme::Light);
     render(&mut app, &ctx, vec![]);
     let shapes = render(&mut app, &ctx, vec![]);
     assert!(
         shapes.iter().any(|shape| matches!(shape, Shape::Rect(rect)
-        if rect.rect.width() > 900.0 && rect.rect.height() > 400.0 && rect.fill == Color32::WHITE)),
-        "The editor canvas must start pure white, independently of host theme"
+        if rect.rect.width() > 900.0 && rect.rect.height() > 400.0 && rect.fill == Color32::from_rgb(22, 25, 33))),
+        "The editor canvas must start dark, independently of host theme"
     );
     assert!(
         shapes
             .iter()
             .any(|shape| matches!(shape, Shape::Ellipse(ellipse)
-        if ellipse.radius.x > ellipse.radius.y && ellipse.fill == Color32::WHITE)),
+        if ellipse.radius.x > ellipse.radius.y && ellipse.fill == Color32::from_rgb(22, 25, 33))),
         "The central topic must be an outlined oval"
     );
     assert!(
@@ -101,6 +101,100 @@ fn bmm_defaults_to_the_reference_canvas_even_on_a_dark_host() {
         "The top-left logo must use the new identity"
     );
     assert!(text_center(&shapes, "branchline").is_none());
+    click(
+        &mut app,
+        &ctx,
+        text_center(&shapes, "More").unwrap(),
+        egui::PointerButton::Primary,
+    );
+    let shapes = render(&mut app, &ctx, vec![]);
+    let toggle = text_center(&shapes, "Switch light / dark theme").unwrap();
+    click(&mut app, &ctx, toggle, egui::PointerButton::Primary);
+    let shapes = render(&mut app, &ctx, vec![]);
+    assert!(
+        shapes.iter().any(|shape| matches!(shape, Shape::Rect(rect)
+        if rect.rect.width() > 900.0 && rect.rect.height() > 400.0 && rect.fill == Color32::WHITE)),
+        "The reference-style white editor must remain available"
+    );
+}
+
+#[test]
+fn dragging_the_selected_root_translates_the_entire_map_without_editing_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    for label in ["Pan right branch", "Pan left branch"] {
+        let root = app.editor.document.root.clone();
+        app.editor.select(&root).unwrap();
+        app.editor.dispatch(EditorAction::AddChild).unwrap();
+        app.editor.editing.as_mut().unwrap().text = label.into();
+        app.editor.commit_edit().unwrap();
+    }
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    let shapes = render(&mut app, &ctx, vec![]);
+    click(
+        &mut app,
+        &ctx,
+        text_center(&shapes, "Central idea").unwrap(),
+        egui::PointerButton::Primary,
+    );
+    assert_eq!(app.editor.selected, app.editor.document.root);
+    let before = app.editor.document.clone();
+    let generation = app.editor.history.generation;
+    for delta in [egui::vec2(160.0, 90.0), egui::vec2(-230.0, -150.0)] {
+        let shapes = render(&mut app, &ctx, vec![]);
+        let labels = ["Central idea", "Pan right branch", "Pan left branch"];
+        let positions = labels.map(|label| text_center(&shapes, label).unwrap());
+        let to = positions[0] + delta;
+        begin_drag(&mut app, &ctx, positions[0], to);
+        release_drag(&mut app, &ctx, to);
+        let shapes = render(&mut app, &ctx, vec![]);
+        for (label, position) in labels.into_iter().zip(positions) {
+            let actual = text_center(&shapes, label).unwrap();
+            assert!(
+                (actual - position - delta).length() < 0.5,
+                "{label} must follow the root drag by {delta:?}, not stay at {actual:?}"
+            );
+        }
+        assert_eq!(app.editor.document, before);
+        assert_eq!(
+            app.editor.history.generation, generation,
+            "Panning must not add document undo steps"
+        );
+    }
+}
+
+#[test]
+fn root_panning_survives_leaving_the_canvas_and_escape_restores_the_view() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    let shapes = render(&mut app, &ctx, vec![]);
+    let from = text_center(&shapes, "Central idea").unwrap();
+    begin_drag(&mut app, &ctx, from, egui::pos2(1500.0, 1000.0));
+    let to = from + egui::vec2(-170.0, 70.0);
+    render(&mut app, &ctx, vec![egui::Event::PointerMoved(to)]);
+    let shapes = render(&mut app, &ctx, vec![]);
+    assert!((text_center(&shapes, "Central idea").unwrap() - to).length() < 0.5);
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    release_drag(&mut app, &ctx, to);
+    let shapes = render(&mut app, &ctx, vec![]);
+    assert!(
+        (text_center(&shapes, "Central idea").unwrap() - from).length() < 0.5,
+        "Cancel must restore the view without changing the root's tree identity"
+    );
+    assert!(!app.editor.is_dirty());
 }
 
 #[test]

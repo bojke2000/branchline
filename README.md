@@ -3,9 +3,10 @@
 A local-first, keyboard-driven mind mapper written in Rust with egui/eframe.
 Made for quick personal brainstorming: a quiet two-sided canvas, automatic
 layout, inline editing, folding, searchable commands and a plain-text notes panel.
-The default editor is white with an outlined oval root, vivid curved branches,
-underlined topics and pale-blue selection. An original blue/teal branching logo
-anchors the grouped icon toolbar. An optional dark theme is under **More**.
+Dark mode is the default. The white reference-style editor remains available
+under **More > Switch light / dark theme**. Both use an outlined oval root,
+vivid curved branches, underlined topics and blue selection. An original
+blue/teal branching logo anchors the grouped icon toolbar.
 
 This is an original early implementation, not Freeplane feature parity or a
 measured usability improvement. No Freeplane code or artwork is included.
@@ -53,6 +54,7 @@ Import always previews compatibility and never edits the source file.
 | Cmd+Shift+S | Save as |
 | Cmd+Q | Quit with unsaved-change protection |
 | Drag blank canvas | Pan |
+| Drag the central root | Pan the entire map without changing its structure or undo history |
 | Drag a topic | Move its whole branch; preview before release |
 | Right-click a topic / blank canvas | Node commands / commands for the current selection, with shortcut hints |
 | Scroll / pinch | Zoom around pointer |
@@ -75,9 +77,12 @@ the moved subtree's own folding, text, notes and links are retained. Top-level
 branches can be dragged across the root onto blank canvas to switch sides.
 Layout remains automatic, not free positioning.
 
-Nothing moves until release. Escape, loss of window focus or release outside the
-canvas cancels. Circular moves, moving the central root and excessive tree depth
-are rejected. Each completed move is a single undo step.
+Branch reorganization commits only on release. Escape, loss of window focus or
+release outside the canvas cancels it. Circular moves, reparenting the central
+root and excessive tree depth are rejected. Each completed branch move is a
+single undo step. Dragging the root instead pans every branch together, even
+when the root passes outside the visible canvas; Escape restores the starting
+view. Root panning does not edit the document or add undo steps.
 
 Shift+click toggles individual nodes; an ordinary click starts a single selection.
 Right-clicking a selected node preserves the group. Delete removes the union of
@@ -151,13 +156,14 @@ deterministic layout, zoom/focus and actual headless egui input routing.
 Review regressions also cover offscreen inline creation, folded/undo selection
 visibility, abandoned IME ownership and cancellation of recovered drafts.
 The BMM interaction tests also cover the default canvas, shared context commands,
-stable branch colors, Shift+arrow reordering, Shift-click selection, atomic
+stable branch colors, dark startup with optional light mode, whole-map root
+panning, Shift+arrow reordering, Shift-click selection, atomic
 batch deletion, drop previews, cycle rejection, side switching and cancellation
 on Escape, outside release or an intervening unsaved-changes dialog.
 
 Executed on this Mac: `cargo fmt --check` passed;
 `cargo clippy --all-targets -- -D warnings` passed;
-`cargo test --locked` passed (48 integration tests);
+`cargo test --locked` passed (50 integration tests);
 `cargo build --release --locked` and `sh scripts/bundle.sh` passed.
 These results do not establish the unverified native scenarios listed below.
 

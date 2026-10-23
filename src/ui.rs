@@ -69,6 +69,11 @@ impl Viewport {
     }
 }
 
+enum CanvasDrag {
+    Pan { origin: Point, initial_pan: Point },
+    Branch(DragSession),
+}
+
 enum Dialog {
     Unsaved,
     Recovery,
@@ -114,7 +119,7 @@ pub struct NativeApp {
     help_open: bool,
     edit_focus: Option<NodeId>,
     composing: Option<Id>,
-    drag: Option<DragSession>,
+    drag: Option<CanvasDrag>,
     allow_close: bool,
     recovery_revision: Option<(u64, u64)>,
     last_change: Instant,
@@ -615,8 +620,8 @@ impl NativeApp {
     pub fn show(&mut self, root_ui: &mut egui::Ui) {
         let ctx = root_ui.ctx().clone();
         if !self.theme_initialized {
-            ctx.set_theme(egui::Theme::Light);
-            root_ui.style_mut().visuals = egui::Visuals::light();
+            ctx.set_theme(egui::Theme::Dark);
+            root_ui.style_mut().visuals = egui::Visuals::dark();
             self.theme_initialized = true;
         }
         if ctx.input(|input| input.viewport().close_requested()) && !self.allow_close {
@@ -710,6 +715,10 @@ impl NativeApp {
                         ("Cmd/Ctrl + N / O / S", "New / open / save"),
                         ("Cmd/Ctrl + Shift + S", "Save as"),
                         ("Drag blank canvas", "Pan"),
+                        (
+                            "Drag the central root",
+                            "Reposition the entire map without editing it",
+                        ),
                         ("Drag a topic", "Preview a branch move; Escape cancels"),
                         ("Shift + click", "Toggle nodes in the selection"),
                         (
@@ -940,8 +949,10 @@ impl NativeApp {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.drag.is_some() {
             if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape)) {
-                self.drag = None;
-                self.status = "Move canceled. The map was not changed.".into();
+                if let Some(CanvasDrag::Pan { initial_pan, .. }) = self.drag.take() {
+                    self.viewport.pan = initial_pan;
+                }
+                self.status = "Drag canceled. The map was not changed.".into();
             }
             return;
         }
@@ -1021,6 +1032,9 @@ impl NativeApp {
         ui.painter().rect_filled(available, 0.0, background);
         let canvas_response = ui.allocate_rect(available, Sense::click_and_drag());
         let center = point(available.center());
+        if matches!(self.drag, Some(CanvasDrag::Pan { .. })) {
+            self.update_drag(ui, available, center);
+        }
         if canvas_response.dragged_by(egui::PointerButton::Primary) && self.drag.is_none() {
             let delta = ui.input(|input| input.pointer.delta());
             self.viewport.pan.x += delta.x;
@@ -1268,15 +1282,9 @@ impl NativeApp {
                     clicked = Some((id.clone(), false, false));
                     edit = true;
                 }
-                if response.drag_started_by(egui::PointerButton::Primary) {
+                if self.drag.is_none() && response.drag_started_by(egui::PointerButton::Primary) {
                     response.request_focus();
-                    if root {
-                        self.status =
-                            "The central idea stays in place. Drag one of its branches instead."
-                                .into();
-                    } else {
-                        drag_started = Some(id.clone());
-                    }
+                    drag_started = Some(id.clone());
                 }
                 response.context_menu(|ui| {
                     if let Some(command) = self.context_menu(ui, &id, true) {
@@ -1284,7 +1292,11 @@ impl NativeApp {
                         clicked = Some((id.clone(), false, true));
                     }
                 });
-                response.on_hover_text("Double-click: edit. Drag: reorganize. Shift-click: multi-select. Right-click: commands.");
+                response.on_hover_text(if root {
+                    "Drag: pan the whole map. Double-click: edit. Right-click: commands."
+                } else {
+                    "Double-click: edit. Drag: reorganize. Shift-click: multi-select. Right-click: commands."
+                });
                 if let Some(galley) = self.galleys.get(&id) {
                     let text_pos = rect.center() - galley.size() * self.viewport.zoom * 0.5;
                     let mut shape = egui::epaint::TextShape::new(
@@ -1367,12 +1379,28 @@ impl NativeApp {
         if let Some(id) = drag_started {
             let result = self.prepare().and_then(|_| self.editor.select(&id));
             if result.is_ok() {
-                self.drag = Some(DragSession::new(
-                    &self.editor.document,
-                    id,
-                    self.editor.revision,
-                ));
-                self.status = "Drag to the middle of a topic for a child, or its top/bottom to reorder. Escape cancels.".into();
+                if id == self.editor.document.root {
+                    if let Some(origin) = ui.input(|input| input.pointer.press_origin()) {
+                        self.drag = Some(CanvasDrag::Pan {
+                            origin: point(origin),
+                            initial_pan: self.viewport.pan,
+                        });
+                        self.status =
+                            "Repositioning the whole map. Escape restores the starting view."
+                                .into();
+                    } else {
+                        self.error = Some(
+                            "Cannot start map panning without the pointer's press position.".into(),
+                        );
+                    }
+                } else {
+                    self.drag = Some(CanvasDrag::Branch(DragSession::new(
+                        &self.editor.document,
+                        id,
+                        self.editor.revision,
+                    )));
+                    self.status = "Drag to the middle of a topic for a child, or its top/bottom to reorder. Escape cancels.".into();
+                }
             }
             self.report(result);
         }
@@ -1401,7 +1429,7 @@ impl NativeApp {
             || self
                 .drag
                 .as_ref()
-                .is_some_and(|drag| drag.revision != self.editor.revision)
+                .is_some_and(|drag| matches!(drag, CanvasDrag::Branch(branch) if branch.revision != self.editor.revision))
             || ui.input(|input| input.viewport().focused == Some(false))
         {
             if self.drag.take().is_some() {
@@ -1410,7 +1438,29 @@ impl NativeApp {
             }
             return;
         }
-        let Some(drag) = &mut self.drag else {
+        if let Some(CanvasDrag::Pan {
+            origin,
+            initial_pan,
+        }) = &self.drag
+        {
+            if let Some(pointer) = ui.input(|input| input.pointer.interact_pos()) {
+                let next = Point {
+                    x: initial_pan.x + pointer.x - origin.x,
+                    y: initial_pan.y + pointer.y - origin.y,
+                };
+                if next != self.viewport.pan {
+                    self.viewport.pan = next;
+                    ui.ctx().request_repaint();
+                }
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            if !ui.input(|input| input.pointer.button_down(egui::PointerButton::Primary)) {
+                self.drag = None;
+                self.status = "Map repositioned. Its structure is unchanged.".into();
+            }
+            return;
+        }
+        let Some(CanvasDrag::Branch(drag)) = &mut self.drag else {
             return;
         };
         let pointer = ui.input(|input| input.pointer.interact_pos());
@@ -1424,7 +1474,9 @@ impl NativeApp {
             24.0 / self.viewport.zoom,
         );
         if ui.input(|input| input.pointer.button_released(egui::PointerButton::Primary)) {
-            let drag = self.drag.take().expect("active drag");
+            let Some(CanvasDrag::Branch(drag)) = self.drag.take() else {
+                unreachable!("Active branch drag");
+            };
             match drag.preview {
                 Some(preview) if preview.rejection.is_none() => {
                     let before = self.editor.revision;
@@ -1458,7 +1510,9 @@ impl NativeApp {
                 "Move canceled because the pointer was released outside the window.".into();
             return;
         }
-        let drag = self.drag.as_ref().expect("active drag");
+        let Some(CanvasDrag::Branch(drag)) = &self.drag else {
+            unreachable!("Active branch drag");
+        };
         let rejected = drag
             .preview
             .as_ref()
