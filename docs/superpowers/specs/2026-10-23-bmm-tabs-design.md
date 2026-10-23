@@ -1,6 +1,7 @@
 # BMM multi-map tabs
 
-Status: design for user review; tab implementation has not started.
+Status: written specification approved by the user; tab implementation has not
+started and requires implementation-plan review and execution-method approval.
 Implementation baseline: `0108246`, including root-drag panning and dark startup.
 
 ## Agreed intent

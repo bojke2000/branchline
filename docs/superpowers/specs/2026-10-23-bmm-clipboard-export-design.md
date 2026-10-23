@@ -1,8 +1,8 @@
 # BMM hierarchical clipboard and Mermaid export
 
-Status: design for user review; clipboard and Mermaid implementation has not
-started. The user approved the conversational design and writing this spec,
-not this written specification or an implementation plan.
+Status: written specification approved by the user; clipboard and Mermaid
+implementation has not started. Implementation requires written-plan review
+and execution-method approval.
 
 Implementation baseline: `c39b19c`, including keyboard panning and
 type-to-replace editing.
