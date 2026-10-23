@@ -29,6 +29,10 @@ pub enum AppCommand {
     Notes,
     Fit,
     Focus,
+    PanLeft,
+    PanRight,
+    PanUp,
+    PanDown,
     Theme,
     Help,
 }
@@ -66,6 +70,10 @@ pub const VIEW_COMMANDS: &[AppCommand] = &[
     AppCommand::Notes,
     AppCommand::Fit,
     AppCommand::Focus,
+    AppCommand::PanLeft,
+    AppCommand::PanRight,
+    AppCommand::PanUp,
+    AppCommand::PanDown,
     AppCommand::Theme,
     AppCommand::Help,
 ];
@@ -75,6 +83,7 @@ enum Binding {
     Plain(Key),
     Alt(Key),
     AltOrShift(Key),
+    AltShift(Key),
     Command(Key),
     CommandShift(Key),
 }
@@ -85,9 +94,14 @@ impl Binding {
             Self::Plain(bound) => {
                 key == bound && !modifiers.command && !modifiers.alt && !modifiers.shift
             }
-            Self::Alt(bound) => key == bound && modifiers.alt && !modifiers.command,
+            Self::Alt(bound) => {
+                key == bound && modifiers.alt && !modifiers.shift && !modifiers.command
+            }
             Self::AltOrShift(bound) => {
-                key == bound && (modifiers.alt || modifiers.shift) && !modifiers.command
+                key == bound && (modifiers.alt ^ modifiers.shift) && !modifiers.command
+            }
+            Self::AltShift(bound) => {
+                key == bound && modifiers.alt && modifiers.shift && !modifiers.command
             }
             Self::Command(bound) => {
                 key == bound && modifiers.command && !modifiers.shift && !modifiers.alt
@@ -158,6 +172,26 @@ impl AppCommand {
             Notes => ("Show / hide notes", "", None),
             Fit => ("Fit map", "", None),
             Focus => ("Focus selection", "", None),
+            PanLeft => (
+                "Pan map left",
+                "Alt+Shift+Left",
+                Some(Binding::AltShift(Key::ArrowLeft)),
+            ),
+            PanRight => (
+                "Pan map right",
+                "Alt+Shift+Right",
+                Some(Binding::AltShift(Key::ArrowRight)),
+            ),
+            PanUp => (
+                "Pan map up",
+                "Alt+Shift+Up",
+                Some(Binding::AltShift(Key::ArrowUp)),
+            ),
+            PanDown => (
+                "Pan map down",
+                "Alt+Shift+Down",
+                Some(Binding::AltShift(Key::ArrowDown)),
+            ),
             Theme => ("Switch light / dark theme", "", None),
             Help => ("Keyboard guide", "", None),
         };
@@ -189,6 +223,19 @@ impl AppCommand {
             Down => EditorAction::Navigate(Direction::Down),
             _ => return None,
         })
+    }
+
+    pub fn is_global_shortcut(self) -> bool {
+        matches!(
+            self,
+            Self::New
+                | Self::Open
+                | Self::Save
+                | Self::SaveAs
+                | Self::Quit
+                | Self::Search
+                | Self::Palette
+        )
     }
 
     pub fn toolbar_label(self) -> &'static str {

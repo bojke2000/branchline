@@ -278,6 +278,10 @@ impl NativeApp {
                     self.viewport.focus(rect.center());
                 }
             }
+            AppCommand::PanLeft => self.viewport.pan.x -= 40.0,
+            AppCommand::PanRight => self.viewport.pan.x += 40.0,
+            AppCommand::PanUp => self.viewport.pan.y -= 40.0,
+            AppCommand::PanDown => self.viewport.pan.y += 40.0,
             AppCommand::Theme => ctx.set_theme(if ctx.global_style().visuals.dark_mode {
                 egui::Theme::Light
             } else {
@@ -702,6 +706,7 @@ impl NativeApp {
                         ("Tab", "Add child / commit and continue with a child"),
                         ("Enter", "Add sibling / commit text while editing"),
                         ("F2 or double-click", "Edit selected idea"),
+                        ("Start typing", "Replace the active idea; Enter commits"),
                         ("Escape", "Cancel inline edit or close search/commands"),
                         ("Arrows", "Navigate the map (text fields keep cursor keys)"),
                         ("Space", "Fold / unfold"),
@@ -710,6 +715,7 @@ impl NativeApp {
                             "Up/down: reorder; right/left: indent/outdent",
                         ),
                         ("Shift + Up / Down", "Reorder among same-side siblings"),
+                        ("Alt + Shift + arrows", "Pan the whole map"),
                         ("Cmd/Ctrl + Z / Shift+Z", "Undo / redo"),
                         ("Cmd/Ctrl + K / F", "Commands / search"),
                         ("Cmd/Ctrl + N / O / S", "New / open / save"),
@@ -960,34 +966,68 @@ impl NativeApp {
         if self.composing.is_some() && self.composing != focused {
             self.composing = None;
         }
-        for event in ctx.input(|input| input.events.clone()) {
+        let events = ctx.input(|input| input.events.clone());
+        let mut preedit = false;
+        for event in &events {
             match event {
                 egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
-                    self.composing = if text.is_empty() { None } else { focused };
+                    preedit = !text.is_empty();
+                    self.composing = if preedit { focused } else { None };
                 }
-                egui::Event::Ime(egui::ImeEvent::Commit(_)) => self.composing = None,
+                egui::Event::Ime(egui::ImeEvent::Commit(_)) => {
+                    preedit = false;
+                    self.composing = None;
+                }
                 _ => {}
             }
         }
-        if self.composing.is_some()
-            || self.palette_open
-            || self.help_open
-            || egui::Popup::is_any_open(ctx)
+        let blocked = self.palette_open || self.help_open || egui::Popup::is_any_open(ctx);
+        let modifiers = ctx.input(|input| input.modifiers);
+        let map_focused = focused.is_some_and(|focused| {
+            self.placed
+                .nodes
+                .keys()
+                .any(|id| focused == Id::unique(("idea", id)))
+        });
+        let map_owns_input = !ctx.egui_wants_keyboard_input() || map_focused;
+        if !blocked
+            && self.editor.editing.is_none()
+            && map_owns_input
+            && !modifiers.command
+            && (!modifiers.ctrl || modifiers.alt)
+            && events.iter().any(|event| match event {
+                egui::Event::Text(text)
+                | egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
+                    text.chars().any(|character| !character.is_control())
+                }
+                _ => false,
+            })
         {
+            let result = self
+                .flush_details()
+                .and_then(|_| self.editor.begin_replacement());
+            if result.is_ok() {
+                self.edit_focus = None;
+                self.focus_selected = true;
+                if preedit {
+                    self.composing = Some(Id::unique(("inline", &self.editor.selected)));
+                }
+            }
+            self.report(result);
             return;
         }
-        let modifiers = ctx.input(|input| input.modifiers);
-        let bound = ctx.input(|input| {
-            input.events.iter().find_map(|event| match event {
-                egui::Event::Key {
-                    key, pressed: true, ..
-                } => commands::shortcut(*key, modifiers).map(|command| (*key, command)),
-                _ => None,
-            })
+        if self.composing.is_some() || blocked {
+            return;
+        }
+        let bound = events.iter().find_map(|event| match event {
+            egui::Event::Key {
+                key, pressed: true, ..
+            } => commands::shortcut(*key, modifiers).map(|command| (*key, command)),
+            _ => None,
         });
         let key = |key| ctx.input(|input| input.key_pressed(key));
         if let Some((_, command)) = bound
-            && command.editor_action().is_none()
+            && command.is_global_shortcut()
         {
             self.run_command(command, ctx);
             return;
@@ -1004,15 +1044,7 @@ impl NativeApp {
         if self.editor.editing.is_some() {
             return;
         }
-        let map_focused = ctx
-            .memory(|memory| memory.focused())
-            .is_some_and(|focused| {
-                self.placed
-                    .nodes
-                    .keys()
-                    .any(|id| focused == Id::unique(("idea", id)))
-            });
-        if ctx.egui_wants_keyboard_input() && !map_focused {
+        if !map_owns_input {
             return;
         }
         if let Some((keycode, command)) = bound {
@@ -1233,29 +1265,29 @@ impl NativeApp {
             {
                 let first_focus = self.edit_focus.as_ref() != Some(&id);
                 let buffer = self.editor.editing.as_mut().expect("editing node");
+                let inline_id = Id::unique(("inline", &id));
+                if first_focus {
+                    ui.memory_mut(|memory| memory.request_focus(inline_id));
+                    let mut state = egui::text_edit::TextEditState::default();
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(0),
+                            egui::text::CCursor::new(buffer.text.chars().count()),
+                        )));
+                    state.store(ui.ctx(), inline_id);
+                    self.edit_focus = Some(id.clone());
+                }
                 let response = ui.put(
                     rect.shrink(7.0),
                     egui::TextEdit::singleline(&mut buffer.text)
-                        .id(Id::unique(("inline", &id)))
+                        .id(inline_id)
                         .font(FontId::proportional(16.0 * self.viewport.zoom))
                         .char_limit(262_144),
                 );
                 if response.changed() {
                     self.recovery_revision = None;
                     self.last_change = Instant::now();
-                }
-                if first_focus {
-                    response.request_focus();
-                    self.edit_focus = Some(id.clone());
-                    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
-                        state
-                            .cursor
-                            .set_char_range(Some(egui::text::CCursorRange::two(
-                                egui::text::CCursor::new(0),
-                                egui::text::CCursor::new(buffer.text.chars().count()),
-                            )));
-                        state.store(ui.ctx(), response.id);
-                    }
                 }
                 if !inline_composing && edit_key.is_none() && response.lost_focus() && !first_focus
                 {

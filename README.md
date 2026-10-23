@@ -41,8 +41,10 @@ Import always previews compatibility and never edits the source file.
 | Tab | Add child; while editing, commit and continue with a child |
 | Enter | Add sibling; while editing, commit without creating a node |
 | F2 / double-click | Edit the selected idea |
+| Start typing on a selected idea | Replace its label as you type; Enter commits, Escape restores |
 | Escape | Cancel inline editing or close search/commands |
 | Arrows | Navigate branches and siblings |
+| Alt+Shift+arrows | Pan the entire map by 40 screen pixels without editing it |
 | Space | Fold/unfold the selected branch |
 | Shift+Up / Shift+Down (or Alt+Up / Alt+Down) | Reorder among visible siblings on the same side |
 | Alt+Right / Alt+Left | Indent under preceding sibling / outdent |
@@ -67,6 +69,9 @@ the root creates a child. New branches alternate sides; descendants inherit
 their root branch's layout side and color. Reordering keeps branch colors stable.
 Folding, notes and metadata are undoable. The command palette, context menus and
 toolbar use the same command definitions and dispatch as keyboard shortcuts.
+Typing replaces only the active node, even when several nodes are selected.
+The original label remains unchanged until the edit is committed; Undo restores
+a committed replacement. Search, notes and dialogs retain their own text input.
 
 ### Drag-and-drop and selection
 
@@ -157,13 +162,15 @@ Review regressions also cover offscreen inline creation, folded/undo selection
 visibility, abandoned IME ownership and cancellation of recovered drafts.
 The BMM interaction tests also cover the default canvas, shared context commands,
 stable branch colors, dark startup with optional light mode, whole-map root
-panning, Shift+arrow reordering, Shift-click selection, atomic
+panning, keyboard panning without stealing text-field shortcuts, type-to-replace
+editing with cancellation and undo, headless Unicode/IME input routing,
+Shift+arrow reordering, Shift-click selection, atomic
 batch deletion, drop previews, cycle rejection, side switching and cancellation
 on Escape, outside release or an intervening unsaved-changes dialog.
 
 Executed on this Mac: `cargo fmt --check` passed;
 `cargo clippy --all-targets -- -D warnings` passed;
-`cargo test --locked` passed (50 integration tests);
+`cargo test --locked` passed (54 integration tests);
 `cargo build --release --locked` and `sh scripts/bundle.sh` passed.
 These results do not establish the unverified native scenarios listed below.
 

@@ -198,6 +198,255 @@ fn root_panning_survives_leaving_the_canvas_and_escape_restores_the_view() {
 }
 
 #[test]
+fn alt_shift_arrows_pan_without_reparenting_and_stay_local_in_text_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    app.editor.dispatch(EditorAction::AddChild).unwrap();
+    app.editor.commit_edit().unwrap();
+    app.editor.dispatch(EditorAction::AddSibling).unwrap();
+    app.editor.commit_edit().unwrap();
+    let selected = app.editor.selected.clone();
+    let before = app.editor.document.clone();
+    let generation = app.editor.history.generation;
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    render(&mut app, &ctx, vec![]);
+    let modifiers = egui::Modifiers {
+        alt: true,
+        shift: true,
+        ..Default::default()
+    };
+    let send = |app: &mut NativeApp, key| {
+        for pressed in [true, false] {
+            render(
+                app,
+                &ctx,
+                vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers,
+                    },
+                ],
+            );
+        }
+    };
+    for (key, delta) in [
+        (egui::Key::ArrowRight, egui::vec2(40.0, 0.0)),
+        (egui::Key::ArrowDown, egui::vec2(0.0, 40.0)),
+        (egui::Key::ArrowLeft, egui::vec2(-40.0, 0.0)),
+        (egui::Key::ArrowUp, egui::vec2(0.0, -40.0)),
+    ] {
+        let shapes = render(&mut app, &ctx, vec![]);
+        let root = text_center(&shapes, "Central idea").unwrap();
+        send(&mut app, key);
+        let shapes = render(&mut app, &ctx, vec![]);
+        assert!((text_center(&shapes, "Central idea").unwrap() - root - delta).length() < 0.5);
+        assert_eq!(app.editor.document, before);
+        assert_eq!(app.editor.selected, selected);
+        assert_eq!(app.editor.history.generation, generation);
+    }
+    app.editor.dispatch(EditorAction::Edit).unwrap();
+    let shapes = render(&mut app, &ctx, vec![]);
+    let root = text_center(&shapes, "Central idea").unwrap();
+    send(&mut app, egui::Key::ArrowRight);
+    let shapes = render(&mut app, &ctx, vec![]);
+    assert!(
+        (text_center(&shapes, "Central idea").unwrap() - root).length() < 0.5,
+        "Text-selection shortcuts must not move the viewport"
+    );
+}
+
+#[test]
+fn typing_replaces_the_active_label_once_with_cancel_commit_and_undo() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let before = app.editor.document.clone();
+    let generation = app.editor.history.generation;
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    let shapes = render(&mut app, &ctx, vec![]);
+    click(
+        &mut app,
+        &ctx,
+        text_center(&shapes, "Central idea").unwrap(),
+        egui::PointerButton::Primary,
+    );
+    let shapes = render(&mut app, &ctx, vec![egui::Event::Text("N".into())]);
+    assert_eq!(app.editor.editing.as_ref().unwrap().text, "N");
+    assert!(text_center(&shapes, "Central idea").is_none());
+    assert!(text_center(&shapes, "N").is_some());
+    render(&mut app, &ctx, vec![egui::Event::Text("ew idea".into())]);
+    assert_eq!(app.editor.editing.as_ref().unwrap().text, "New idea");
+    assert_eq!(app.editor.document, before);
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert!(app.editor.editing.is_none());
+    assert_eq!(app.editor.document, before);
+    assert_eq!(app.editor.history.generation, generation);
+    render(&mut app, &ctx, vec![egui::Event::Text("Caf\u{e9}".into())]);
+    render(&mut app, &ctx, vec![egui::Event::Text(" notes".into())]);
+    assert_eq!(app.editor.editing.as_ref().unwrap().text, "Caf\u{e9} notes");
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert!(app.editor.editing.is_none());
+    assert_eq!(
+        app.editor.document.nodes[&app.editor.document.root].text,
+        "Caf\u{e9} notes"
+    );
+    assert_eq!(app.editor.history.generation, generation + 1);
+    app.editor.dispatch(EditorAction::Undo).unwrap();
+    assert_eq!(app.editor.document, before);
+}
+
+#[test]
+fn typing_stays_in_search_then_replaces_only_the_active_multiselected_node() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    app.editor.dispatch(EditorAction::AddChild).unwrap();
+    app.editor.commit_edit().unwrap();
+    let root = app.editor.document.root.clone();
+    app.editor.toggle_selection(&root).unwrap();
+    assert_eq!(app.editor.selection().len(), 2);
+    let before = app.editor.document.clone();
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    render(&mut app, &ctx, vec![]);
+    let modifiers = egui::Modifiers {
+        command: true,
+        mac_cmd: true,
+        ..Default::default()
+    };
+    render(
+        &mut app,
+        &ctx,
+        vec![
+            egui::Event::ModifiersChanged(modifiers),
+            egui::Event::Key {
+                key: egui::Key::F,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            },
+        ],
+    );
+    render(
+        &mut app,
+        &ctx,
+        vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            egui::Event::Text("needle".into()),
+        ],
+    );
+    assert!(app.editor.editing.is_none());
+    assert_eq!(app.editor.document, before);
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Text("Replacement".into())],
+    );
+    let buffer = app.editor.editing.as_ref().unwrap();
+    assert_eq!(buffer.id, root);
+    assert_eq!(buffer.text, "Replacement");
+    assert_eq!(app.editor.selection().len(), 1);
+    app.editor.commit_edit().unwrap();
+    assert_eq!(app.editor.document.nodes[&root].text, "Replacement");
+    for (id, node) in &before.nodes {
+        if id != &root {
+            assert_eq!(&app.editor.document.nodes[id], node);
+        }
+    }
+}
+
+#[test]
+fn ime_composition_can_start_a_replacement_without_committing_the_old_label() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let before = app.editor.document.clone();
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    render(&mut app, &ctx, vec![]);
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: "\u{65b0}".into(),
+            active_range_chars: Some(0..1),
+        })],
+    );
+    assert!(app.editor.editing.is_some());
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Ime(egui::ImeEvent::Commit("\u{65b0}".into()))],
+    );
+    assert_eq!(app.editor.editing.as_ref().unwrap().text, "\u{65b0}");
+    assert_eq!(app.editor.document, before);
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert!(app.editor.editing.is_none());
+    assert_eq!(
+        app.editor.document.nodes[&app.editor.document.root].text,
+        "\u{65b0}"
+    );
+    let committed = app.editor.document.clone();
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Ime(egui::ImeEvent::Commit(
+            "Late commit".into(),
+        ))],
+    );
+    assert!(
+        app.editor.editing.is_none(),
+        "An IME commit without an owned draft must not replace another label"
+    );
+    assert_eq!(app.editor.document, committed);
+}
+
+#[test]
 fn branch_underlines_share_their_root_branch_color() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();

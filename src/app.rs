@@ -300,10 +300,21 @@ impl Editor {
     }
 
     fn begin_edit(&mut self) {
+        self.start_edit(self.document.nodes[&self.selected].text.clone());
+    }
+
+    pub fn begin_replacement(&mut self) -> Result<(), EditorError> {
+        self.commit_edit()?;
+        self.replace_selection(self.selected.clone());
+        self.start_edit(String::new());
+        Ok(())
+    }
+
+    fn start_edit(&mut self, text: String) {
         self.draft_revision = self.draft_revision.wrapping_add(1);
         self.editing = Some(EditBuffer {
             id: self.selected.clone(),
-            text: self.document.nodes[&self.selected].text.clone(),
+            text,
         });
     }
 
