@@ -1,8 +1,11 @@
-# Branchline
+# BMM
 
 A local-first, keyboard-driven mind mapper written in Rust with egui/eframe.
 Made for quick personal brainstorming: a quiet two-sided canvas, automatic
 layout, inline editing, folding, searchable commands and a plain-text notes panel.
+The default editor is white with an outlined oval root, vivid curved branches,
+underlined topics and pale-blue selection. An original blue/teal branching logo
+anchors the grouped icon toolbar. An optional dark theme is under **More**.
 
 This is an original early implementation, not Freeplane feature parity or a
 measured usability improvement. No Freeplane code or artwork is included.
@@ -19,7 +22,7 @@ On macOS, build a local app bundle:
 
 ```sh
 sh scripts/bundle.sh
-open target/bundle/Branchline.app
+open target/bundle/BMM.app
 ```
 
 If Cargo is not on PATH after a user-local installation, first run
@@ -40,27 +43,56 @@ Import always previews compatibility and never edits the source file.
 | Escape | Cancel inline editing or close search/commands |
 | Arrows | Navigate branches and siblings |
 | Space | Fold/unfold the selected branch |
-| Alt+Up / Alt+Down | Reorder among siblings |
+| Shift+Up / Shift+Down (or Alt+Up / Alt+Down) | Reorder among visible siblings on the same side |
 | Alt+Right / Alt+Left | Indent under preceding sibling / outdent |
-| Delete / Backspace | Delete; nonempty subtrees require confirmation |
+| Shift+click | Add/remove a node from the selection |
+| Delete / Backspace | Delete selected branches; multi-selection and nonempty subtrees require one confirmation |
 | Cmd+Z / Cmd+Shift+Z | Undo / redo |
 | Cmd+K / Cmd+F | Command palette / search labels and notes |
 | Cmd+N / Cmd+O / Cmd+S | New / open / save |
 | Cmd+Shift+S | Save as |
 | Cmd+Q | Quit with unsaved-change protection |
 | Drag blank canvas | Pan |
+| Drag a topic | Move its whole branch; preview before release |
+| Right-click a topic / blank canvas | Node commands / commands for the current selection, with shortcut hints |
 | Scroll / pinch | Zoom around pointer |
 | Fit map / Focus | Fit all visible nodes / center selection |
 
-Use Ctrl instead of Cmd on other platforms. Text fields retain cursor keys
-and local text undo. Click blank canvas after using another control to return
+Use Ctrl instead of Cmd on other platforms. Text fields retain cursor keys,
+Shift+arrow text selection and local text undo. Click blank canvas after using another control to return
 keyboard focus to the map. The root cannot be deleted or outdented; Enter on
 the root creates a child. New branches alternate sides; descendants inherit
-their root branch's layout side. Folding, notes and metadata are undoable.
+their root branch's layout side and color. Reordering keeps branch colors stable.
+Folding, notes and metadata are undoable. The command palette, context menus and
+toolbar use the same command definitions and dispatch as keyboard shortcuts.
+
+### Drag-and-drop and selection
+
+Drop in the middle of a topic to append a child, or near its top/bottom to insert
+before/after it. A highlighted destination, insertion marker and pointer label
+show the planned placement. Dropping into a folded topic unfolds that topic;
+the moved subtree's own folding, text, notes and links are retained. Top-level
+branches can be dragged across the root onto blank canvas to switch sides.
+Layout remains automatic, not free positioning.
+
+Nothing moves until release. Escape, loss of window focus or release outside the
+canvas cancels. Circular moves, moving the central root and excessive tree depth
+are rejected. Each completed move is a single undo step.
+
+Shift+click toggles individual nodes; an ordinary click starts a single selection.
+Right-clicking a selected node preserves the group. Delete removes the union of
+the selected subtrees, without counting overlapping selections twice, and one
+undo restores the deletion. If the central root is included, the confirmation
+explicitly says it will be kept. Other commands operate on the active node;
+dragging selects and moves only the grabbed branch, not the whole group.
 
 ## Documents and safety
 
-Native `.branchline` files are versioned JSON. Saves use a flushed temporary
+Native `.branchline` files are versioned JSON. The existing extension, internal
+application identifier and recovery location are retained for compatibility
+with earlier Branchline builds; the visible product and app bundle are BMM.
+The source directory and Cargo executable remain named `branchline`.
+Saves use a flushed temporary
 sibling and atomic replacement. Save As and export explicitly confirm existing
 destinations. New/Open/Quit ask Save, Discard or Cancel when there are changes;
 failed/cancelled saves do not continue the pending action.
@@ -118,29 +150,43 @@ dirty-state checkpoints, staged import cancellation, keyboard edit modes,
 deterministic layout, zoom/focus and actual headless egui input routing.
 Review regressions also cover offscreen inline creation, folded/undo selection
 visibility, abandoned IME ownership and cancellation of recovered drafts.
+The BMM interaction tests also cover the default canvas, shared context commands,
+stable branch colors, Shift+arrow reordering, Shift-click selection, atomic
+batch deletion, drop previews, cycle rejection, side switching and cancellation
+on Escape, outside release or an intervening unsaved-changes dialog.
 
 Executed on this Mac: `cargo fmt --check` passed;
 `cargo clippy --all-targets -- -D warnings` passed;
-`cargo test --locked` passed (30 integration tests);
+`cargo test --locked` passed (48 integration tests);
 `cargo build --release --locked` and `sh scripts/bundle.sh` passed.
 These results do not establish the unverified native scenarios listed below.
 
-Measured on this development Mac, optimized generated-map edit plus layout:
+Measured on this development Mac, optimized generated-map operations plus layout:
 
-| Nodes | First sample | Warm median (20) | Warm p95 |
-| --- | --- | --- | --- |
-| 100 | 0.115 ms | 0.077 ms | 0.085 ms |
-| 1,000 | 1.041 ms | 0.931 ms | 0.958 ms |
-| 10,000 | 11.262 ms | 11.381 ms | 11.475 ms |
+| Operation | Nodes | First sample | Warm median (20) | Warm p95 |
+| --- | --- | --- | --- | --- |
+| Text edit + layout | 100 | 0.309 ms | 0.192 ms | 0.236 ms |
+| Text edit + layout | 1,000 | 2.797 ms | 1.545 ms | 2.288 ms |
+| Text edit + layout | 10,000 | 11.500 ms | 11.175 ms | 11.446 ms |
+| Subtree move + layout | 100 | 0.244 ms | 0.190 ms | 0.300 ms |
+| Subtree move + layout | 1,000 | 1.372 ms | 1.162 ms | 1.283 ms |
+| Subtree move + layout | 10,000 | 13.022 ms | 12.173 ms | 12.530 ms |
 
-The sampled process used 0.27 s elapsed, 0.26 s user CPU and <0.01 s system
-CPU, with maximum resident size 61,571,072 bytes. The benchmark process had no
-children; this is not UI renderer memory. First samples are not guaranteed
-cold OS-cache measurements. Rendering, text measurement, dialogs and real
-interaction are excluded. There is no equivalent Freeplane benchmark or
+The sampled process used 0.80 s elapsed, 0.57 s user CPU and 0.01 s system
+CPU, with maximum resident size 62,717,952 bytes. Edit and move phases use
+separate histories; the old history is released before starting the next phase.
+The benchmark process had no children; this is not UI renderer memory.
+First samples are not guaranteed cold OS-cache measurements. Rendering, text
+measurement, drag hit-testing, selection reconciliation, dialogs and real
+interaction are excluded. The additional move phase means whole-process totals
+are not equivalent to the earlier edit-only benchmark.
+There is no equivalent Freeplane benchmark or
 agent-token measurement, so no relative speed/context claim is made.
 
-macOS ARM64 build and native window creation were observed. REA runtime screenshot
+The macOS ARM64 BMM bundle was launched; its exact executable, launch time and
+1280x872 native window were observed, then the owned verification instance was
+closed. This establishes window readiness, not interactive usability.
+REA runtime screenshot
 and accessibility capture were blocked by missing macOS Screen Recording and
 Accessibility permissions; no permission settings were changed or bypassed.
 Automated UI tests run real egui frames but are not a human usability study. Real IME, VoiceOver,

@@ -15,9 +15,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     eframe::run_native(
-        "Branchline",
+        "BMM",
         options,
         Box::new(|context| {
+            context.egui_ctx.set_theme(egui::Theme::Light);
             let mut style = (*context.egui_ctx.global_style()).clone();
             style.spacing.item_spacing = egui::vec2(10.0, 8.0);
             style.spacing.button_padding = egui::vec2(10.0, 6.0);

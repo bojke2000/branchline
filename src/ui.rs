@@ -1,6 +1,10 @@
+pub use crate::commands::palette_matches;
 use crate::{
-    app::{Direction, Editor, EditorAction, EditorError, EditorKey, PendingAction},
-    document::{Command, Document, NodeId},
+    app::{Editor, EditorAction, EditorError, EditorKey, PendingAction},
+    appearance,
+    commands::{self, AppCommand, FILE_COMMANDS, NAVIGATION_COMMANDS, VIEW_COMMANDS},
+    document::{Command, DeletionPlan, Document, MovePlacement, NodeId},
+    drag::DragSession,
     interchange::{export_mm, import_mm, read_native},
     layout::{self, Layout, Point, Rect, Size},
     storage::{RecoveryRecord, RecoveryStore, StorageError, atomic_write, read_bounded},
@@ -65,47 +69,11 @@ impl Viewport {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct PaletteCommand {
-    pub label: &'static str,
-    pub shortcut: &'static str,
-    pub action: EditorAction,
-}
-
-pub fn palette_matches(query: &str) -> Vec<PaletteCommand> {
-    let query = query.to_lowercase();
-    [
-        ("Add child", "Tab", EditorAction::AddChild),
-        ("Add sibling", "Enter", EditorAction::AddSibling),
-        ("Edit idea", "F2", EditorAction::Edit),
-        ("Fold / unfold branch", "Space", EditorAction::Fold),
-        ("Move earlier", "Alt+Up", EditorAction::MoveUp),
-        ("Move later", "Alt+Down", EditorAction::MoveDown),
-        (
-            "Indent under previous sibling",
-            "Alt+Right",
-            EditorAction::Indent,
-        ),
-        ("Outdent to parent level", "Alt+Left", EditorAction::Outdent),
-        ("Undo", "Cmd/Ctrl+Z", EditorAction::Undo),
-        ("Redo", "Cmd/Ctrl+Shift+Z", EditorAction::Redo),
-        ("Delete idea", "Delete", EditorAction::Delete),
-    ]
-    .into_iter()
-    .filter(|(label, _, _)| label.to_lowercase().contains(&query))
-    .map(|(label, shortcut, action)| PaletteCommand {
-        label,
-        shortcut,
-        action,
-    })
-    .collect()
-}
-
 enum Dialog {
     Unsaved,
     Recovery,
     Import,
-    Delete(NodeId),
+    Delete(DeletionPlan),
     Overwrite {
         path: PathBuf,
         export: Option<Vec<u8>>,
@@ -129,8 +97,10 @@ pub struct NativeApp {
     viewport: Viewport,
     placed: Layout,
     galleys: BTreeMap<NodeId, Arc<egui::Galley>>,
+    branch_colors: BTreeMap<NodeId, Color32>,
     layout_revision: Option<u64>,
     cached_dark: bool,
+    theme_initialized: bool,
     focus_selected: bool,
     fit_requested: bool,
     notes_open: bool,
@@ -144,6 +114,7 @@ pub struct NativeApp {
     help_open: bool,
     edit_focus: Option<NodeId>,
     composing: Option<Id>,
+    drag: Option<DragSession>,
     allow_close: bool,
     recovery_revision: Option<(u64, u64)>,
     last_change: Instant,
@@ -163,8 +134,10 @@ impl NativeApp {
             viewport: Viewport::default(),
             placed: Layout::default(),
             galleys: BTreeMap::new(),
+            branch_colors: BTreeMap::new(),
             layout_revision: None,
             cached_dark: false,
+            theme_initialized: false,
             focus_selected: false,
             fit_requested: false,
             notes_open: false,
@@ -178,6 +151,7 @@ impl NativeApp {
             help_open: false,
             edit_focus: None,
             composing: None,
+            drag: None,
             allow_close: false,
             recovery_revision: None,
             last_change: Instant::now(),
@@ -192,7 +166,6 @@ impl NativeApp {
 
     fn flush_details(&mut self) -> Result<(), EditorError> {
         if let Some(details) = self.details.clone() {
-            let selected = self.editor.selected.clone();
             if self.editor.document.nodes.contains_key(&details.id) {
                 self.editor.execute(Command::SetNotes {
                     id: details.id.clone(),
@@ -202,9 +175,6 @@ impl NativeApp {
                     id: details.id,
                     link: details.link,
                 })?;
-            }
-            if self.editor.document.nodes.contains_key(&selected) {
-                self.editor.selected = selected;
             }
             self.details = None;
         }
@@ -259,16 +229,10 @@ impl NativeApp {
     fn action(&mut self, action: EditorAction) {
         let result = self.flush_details().and_then(|_| {
             if matches!(action, EditorAction::Delete) {
-                if self.editor.selected == self.editor.document.root {
-                    return Err(EditorError::State(
-                        "The central idea cannot be deleted".into(),
-                    ));
-                }
-                if !self.editor.document.nodes[&self.editor.selected]
-                    .children
-                    .is_empty()
-                {
-                    self.dialog = Some(Dialog::Delete(self.editor.selected.clone()));
+                let ids = self.editor.selection().iter().cloned().collect::<Vec<_>>();
+                let plan = self.editor.document.plan_deletion(&ids)?;
+                if ids.len() > 1 || plan.node_count > 1 {
+                    self.dialog = Some(Dialog::Delete(plan));
                     return Ok(());
                 }
             }
@@ -277,6 +241,214 @@ impl NativeApp {
             Ok(())
         });
         self.report(result);
+    }
+
+    fn run_command(&mut self, command: AppCommand, ctx: &egui::Context) {
+        if let Some(action) = command.editor_action() {
+            self.action(action);
+            return;
+        }
+        match command {
+            AppCommand::New => self.request(PendingAction::New, ctx),
+            AppCommand::Open => self.open_file(ctx),
+            AppCommand::Save => self.save_file(false, ctx),
+            AppCommand::SaveAs => self.save_file(true, ctx),
+            AppCommand::Export => self.export_file(ctx),
+            AppCommand::Quit => self.request(PendingAction::Quit, ctx),
+            AppCommand::Search => self.open_search(),
+            AppCommand::Palette => self.open_palette(),
+            AppCommand::Notes => {
+                if self.notes_open {
+                    let result = self.flush_details();
+                    if let Err(error) = result {
+                        self.report(Err(error));
+                        return;
+                    }
+                }
+                self.notes_open = !self.notes_open;
+            }
+            AppCommand::Fit => self.fit_requested = true,
+            AppCommand::Focus => {
+                if let Some(rect) = self.placed.nodes.get(&self.editor.selected) {
+                    self.viewport.focus(rect.center());
+                }
+            }
+            AppCommand::Theme => ctx.set_theme(if ctx.global_style().visuals.dark_mode {
+                egui::Theme::Light
+            } else {
+                egui::Theme::Dark
+            }),
+            AppCommand::Help => self.help_open = true,
+            _ => unreachable!("Editor commands are dispatched above"),
+        }
+    }
+
+    fn command_enabled(&self, command: AppCommand, target: &NodeId) -> bool {
+        if command == AppCommand::Delete
+            && self.editor.is_selected(target)
+            && self
+                .editor
+                .selection()
+                .iter()
+                .any(|id| id != &self.editor.document.root)
+        {
+            return true;
+        }
+        if matches!(
+            command,
+            AppCommand::Delete
+                | AppCommand::Indent
+                | AppCommand::Outdent
+                | AppCommand::MoveUp
+                | AppCommand::MoveDown
+        ) && target == &self.editor.document.root
+        {
+            return false;
+        }
+        command != AppCommand::Fold || !self.editor.document.nodes[target].children.is_empty()
+    }
+
+    fn menu_commands(
+        &self,
+        ui: &mut egui::Ui,
+        commands: &[AppCommand],
+        target: &NodeId,
+    ) -> Option<AppCommand> {
+        let mut chosen = None;
+        for command in commands {
+            let spec = command.spec();
+            if ui
+                .add_enabled(
+                    self.command_enabled(*command, target),
+                    egui::Button::new(spec.label).shortcut_text(spec.shortcut),
+                )
+                .clicked()
+            {
+                chosen = Some(*command);
+                ui.close();
+            }
+        }
+        chosen
+    }
+
+    fn context_menu(
+        &self,
+        ui: &mut egui::Ui,
+        target: &NodeId,
+        on_node: bool,
+    ) -> Option<AppCommand> {
+        ui.set_min_width(245.0);
+        if self.editor.is_selected(target) && self.editor.selection().len() > 1 {
+            ui.weak(format!("{} selected ideas", self.editor.selection().len()));
+        } else {
+            ui.weak(if on_node {
+                "This idea"
+            } else {
+                "Current selection"
+            });
+        }
+        ui.separator();
+        let mut chosen = self.menu_commands(
+            ui,
+            &[
+                AppCommand::AddChild,
+                AppCommand::AddSibling,
+                AppCommand::Edit,
+                AppCommand::Fold,
+            ],
+            target,
+        );
+        ui.menu_button("Organize branch", |ui| {
+            chosen = self
+                .menu_commands(
+                    ui,
+                    &[
+                        AppCommand::MoveUp,
+                        AppCommand::MoveDown,
+                        AppCommand::Indent,
+                        AppCommand::Outdent,
+                    ],
+                    target,
+                )
+                .or(chosen);
+        });
+        ui.menu_button("Navigate", |ui| {
+            chosen = self
+                .menu_commands(ui, NAVIGATION_COMMANDS, target)
+                .or(chosen);
+        });
+        chosen = self
+            .menu_commands(ui, &[AppCommand::Delete], target)
+            .or(chosen);
+        ui.separator();
+        chosen = self
+            .menu_commands(ui, &[AppCommand::Undo, AppCommand::Redo], target)
+            .or(chosen);
+        ui.separator();
+        ui.menu_button("File", |ui| {
+            chosen = self.menu_commands(ui, FILE_COMMANDS, target).or(chosen);
+        });
+        ui.menu_button("View and tools", |ui| {
+            chosen = self.menu_commands(ui, VIEW_COMMANDS, target).or(chosen);
+        });
+        chosen
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui, blocked: bool) {
+        let ctx = ui.ctx().clone();
+        ui.add_enabled_ui(!blocked, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                appearance::logo(ui);
+                ui.separator();
+                for command in [AppCommand::New, AppCommand::Open, AppCommand::Save] {
+                    if appearance::toolbar_button(ui, command, true, false).clicked() {
+                        self.run_command(command, &ctx);
+                    }
+                }
+                ui.menu_button("More", |ui| {
+                    let commands = [
+                        AppCommand::SaveAs,
+                        AppCommand::Export,
+                        AppCommand::Theme,
+                        AppCommand::Help,
+                    ];
+                    if let Some(command) = self.menu_commands(ui, &commands, &self.editor.selected)
+                    {
+                        self.run_command(command, &ctx);
+                    }
+                });
+                ui.separator();
+                for command in [AppCommand::Search, AppCommand::Palette, AppCommand::Notes] {
+                    let active = match command {
+                        AppCommand::Search => self.search_open,
+                        AppCommand::Palette => self.palette_open,
+                        _ => self.notes_open,
+                    };
+                    if appearance::toolbar_button(ui, command, true, active).clicked() {
+                        self.run_command(command, &ctx);
+                    }
+                }
+            });
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                for group in [
+                    &[AppCommand::AddChild, AppCommand::AddSibling][..],
+                    &[AppCommand::Edit, AppCommand::Fold, AppCommand::Delete],
+                    &[AppCommand::Undo, AppCommand::Redo],
+                    &[AppCommand::Fit, AppCommand::Focus],
+                ] {
+                    if group[0] != AppCommand::AddChild {
+                        ui.separator();
+                    }
+                    for command in group {
+                        let enabled = self.command_enabled(*command, &self.editor.selected);
+                        if appearance::toolbar_button(ui, *command, enabled, false).clicked() {
+                            self.run_command(*command, &ctx);
+                        }
+                    }
+                }
+            });
+        });
     }
 
     fn request(&mut self, action: PendingAction, ctx: &egui::Context) {
@@ -300,6 +472,7 @@ impl NativeApp {
         self.details = None;
         self.recovery_revision = None;
         self.fit_requested = true;
+        self.drag = None;
     }
 
     fn perform_pending(&mut self, ctx: &egui::Context) {
@@ -366,7 +539,7 @@ impl NativeApp {
         }
         let path = if save_as || self.editor.path.is_none() {
             rfd::FileDialog::new()
-                .add_filter("Branchline", &["branchline"])
+                .add_filter("BMM mind map", &["branchline"])
                 .set_file_name("Ideas.branchline")
                 .save_file()
         } else {
@@ -417,7 +590,7 @@ impl NativeApp {
         match result {
             Ok(report) => {
                 let accepted = rfd::MessageDialog::new().set_title("Export supported Freeplane data")
-                    .set_description("Exports node text, order, IDs, folding, branch sides, plain notes and links only. Formatting, rich content, icons, cross-links and scripts from earlier imports are not recoverable. The current Branchline document will not be replaced.")
+                    .set_description("Exports node text, order, IDs, folding, branch sides, plain notes and links only. Formatting, rich content, icons, cross-links and scripts from earlier imports are not recoverable. The current BMM document will not be replaced.")
                     .set_buttons(rfd::MessageButtons::OkCancel).show() == rfd::MessageDialogResult::Ok;
                 if accepted
                     && let Some(path) = rfd::FileDialog::new()
@@ -441,6 +614,11 @@ impl NativeApp {
 
     pub fn show(&mut self, root_ui: &mut egui::Ui) {
         let ctx = root_ui.ctx().clone();
+        if !self.theme_initialized {
+            ctx.set_theme(egui::Theme::Light);
+            root_ui.style_mut().visuals = egui::Visuals::light();
+            self.theme_initialized = true;
+        }
         if ctx.input(|input| input.viewport().close_requested()) && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.dialog.is_none() {
@@ -454,77 +632,13 @@ impl NativeApp {
         }
         let text_pending = self.editor.editing.is_some();
         let blocked = self.dialog.is_some();
-        egui::Panel::top("toolbar").show(root_ui, |ui| {
-            ui.add_space(8.0);
-            ui.add_enabled_ui(!blocked, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(12.0);
-                    ui.label(egui::RichText::new("branchline").strong().size(21.0));
-                    ui.add_space(18.0);
-                    if ui.button("New").clicked() {
-                        self.request(PendingAction::New, &ctx);
-                    }
-                    if ui.button("Open").clicked() {
-                        self.open_file(&ctx);
-                    }
-                    if ui.button("Save").clicked() {
-                        self.save_file(false, &ctx);
-                    }
-                    ui.menu_button("More", |ui| {
-                        if ui.button("Save as...").clicked() {
-                            self.save_file(true, &ctx);
-                            ui.close();
-                        }
-                        if ui.button("Export Freeplane...").clicked() {
-                            self.export_file(&ctx);
-                            ui.close();
-                        }
-                        if ui.button("Keyboard guide").clicked() {
-                            self.help_open = true;
-                            ui.close();
-                        }
-                    });
-                    ui.separator();
-                    if ui.button("Undo").clicked() {
-                        self.action(EditorAction::Undo);
-                    }
-                    if ui.button("Redo").clicked() {
-                        self.action(EditorAction::Redo);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(12.0);
-                        if ui
-                            .button(if ui.visuals().dark_mode {
-                                "Light"
-                            } else {
-                                "Dark"
-                            })
-                            .clicked()
-                        {
-                            ctx.set_theme(if ui.visuals().dark_mode {
-                                egui::Theme::Light
-                            } else {
-                                egui::Theme::Dark
-                            });
-                        }
-                        if ui.button("Notes").clicked() {
-                            if self.notes_open {
-                                let result = self.flush_details();
-                                self.report(result);
-                            }
-                            self.notes_open = !self.notes_open;
-                        }
-                        if ui.button("Commands").clicked() {
-                            self.open_palette();
-                        }
-                        if ui.button("Search").clicked() {
-                            self.open_search();
-                        }
-                    });
-                });
-            });
-            ui.add_space(8.0);
-        });
+        egui::Panel::top("toolbar")
+            .frame(
+                egui::Frame::new()
+                    .fill(ctx.global_style().visuals.panel_fill)
+                    .inner_margin(egui::Margin::symmetric(12, 8)),
+            )
+            .show(root_ui, |ui| self.toolbar(ui, blocked));
         egui::Panel::bottom("status").show(root_ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -539,17 +653,10 @@ impl NativeApp {
                     }
                 ));
                 ui.separator();
-                ui.weak("Tab: child   Enter: sibling   F2: edit   Space: fold");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Fit map").clicked() {
-                        self.fit_requested = true;
-                    }
-                    if ui.button("Focus").clicked()
-                        && let Some(rect) = self.placed.nodes.get(&self.editor.selected)
-                    {
-                        self.viewport.focus(rect.center());
-                    }
-                });
+                ui.weak(format!(
+                    "{} selected  /  Shift-click: multi-select  /  Right-click: commands",
+                    self.editor.selection().len()
+                ));
             });
             if let Some(error) = self.error.clone() {
                 ui.horizontal_wrapped(|ui| {
@@ -580,7 +687,7 @@ impl NativeApp {
         }
         self.dialogs(&ctx);
         if self.help_open {
-            egui::Window::new("A little less friction")
+            egui::Window::new("BMM keyboard and mouse guide")
                 .open(&mut self.help_open)
                 .resizable(false)
                 .show(&ctx, |ui| {
@@ -597,11 +704,22 @@ impl NativeApp {
                             "Alt + arrows",
                             "Up/down: reorder; right/left: indent/outdent",
                         ),
+                        ("Shift + Up / Down", "Reorder among same-side siblings"),
                         ("Cmd/Ctrl + Z / Shift+Z", "Undo / redo"),
                         ("Cmd/Ctrl + K / F", "Commands / search"),
                         ("Cmd/Ctrl + N / O / S", "New / open / save"),
                         ("Cmd/Ctrl + Shift + S", "Save as"),
                         ("Drag blank canvas", "Pan"),
+                        ("Drag a topic", "Preview a branch move; Escape cancels"),
+                        ("Shift + click", "Toggle nodes in the selection"),
+                        (
+                            "Delete / Backspace",
+                            "Delete selected branches; one undo restores them",
+                        ),
+                        (
+                            "Right-click",
+                            "Commands for the clicked idea or current selection",
+                        ),
                         ("Scroll / pinch", "Zoom around pointer"),
                     ] {
                         ui.horizontal(|ui| {
@@ -646,7 +764,7 @@ impl NativeApp {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".into());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "{}{} — Branchline",
+            "{}{} — BMM",
             if self.editor.is_dirty() { "* " } else { "" },
             title
         )));
@@ -789,11 +907,17 @@ impl NativeApp {
             }
             let matches = palette_matches(&self.palette_query);
             if ctx.input(|input| input.key_pressed(Key::Enter)) {
-                action = matches.first().map(|command| command.action);
+                action = matches
+                    .iter()
+                    .find(|command| self.command_enabled(command.action, &self.editor.selected))
+                    .map(|command| command.action);
             }
             for command in matches {
                 if ui
-                    .button(format!("{}    {}", command.label, command.shortcut))
+                    .add_enabled(
+                        self.command_enabled(command.action, &self.editor.selected),
+                        egui::Button::new(command.label).shortcut_text(command.shortcut),
+                    )
                     .clicked()
                 {
                     action = Some(command.action);
@@ -809,11 +933,18 @@ impl NativeApp {
         });
         if let Some(action) = action {
             self.palette_open = false;
-            self.action(action);
+            self.run_command(action, ctx);
         }
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.drag.is_some() {
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+                self.drag = None;
+                self.status = "Move canceled. The map was not changed.".into();
+            }
+            return;
+        }
         let focused = ctx.memory(|memory| memory.focused());
         if self.composing.is_some() && self.composing != focused {
             self.composing = None;
@@ -827,36 +958,28 @@ impl NativeApp {
                 _ => {}
             }
         }
-        if self.composing.is_some() || self.palette_open || self.help_open {
+        if self.composing.is_some()
+            || self.palette_open
+            || self.help_open
+            || egui::Popup::is_any_open(ctx)
+        {
             return;
         }
-        let (modifiers, pressed) = ctx.input(|input| (input.modifiers, input.keys_down.clone()));
+        let modifiers = ctx.input(|input| input.modifiers);
+        let bound = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Key {
+                    key, pressed: true, ..
+                } => commands::shortcut(*key, modifiers).map(|command| (*key, command)),
+                _ => None,
+            })
+        });
         let key = |key| ctx.input(|input| input.key_pressed(key));
-        if modifiers.command {
-            if key(Key::K) {
-                self.open_palette();
-                return;
-            }
-            if key(Key::F) {
-                self.open_search();
-                return;
-            }
-            if key(Key::S) {
-                self.save_file(modifiers.shift, ctx);
-                return;
-            }
-            if key(Key::O) {
-                self.open_file(ctx);
-                return;
-            }
-            if key(Key::N) {
-                self.request(PendingAction::New, ctx);
-                return;
-            }
-            if key(Key::Q) {
-                self.request(PendingAction::Quit, ctx);
-                return;
-            }
+        if let Some((_, command)) = bound
+            && command.editor_action().is_none()
+        {
+            self.run_command(command, ctx);
+            return;
         }
         if key(Key::Escape) && self.search_open && self.editor.editing.is_none() {
             self.search_open = false;
@@ -881,46 +1004,9 @@ impl NativeApp {
         if ctx.egui_wants_keyboard_input() && !map_focused {
             return;
         }
-        if modifiers.command && key(Key::Z) {
-            self.action(if modifiers.shift {
-                EditorAction::Redo
-            } else {
-                EditorAction::Undo
-            });
-            return;
-        }
-        if modifiers.command {
-            return;
-        }
-        for (keycode, direction, movement) in [
-            (Key::ArrowLeft, Direction::Left, EditorAction::Outdent),
-            (Key::ArrowRight, Direction::Right, EditorAction::Indent),
-            (Key::ArrowUp, Direction::Up, EditorAction::MoveUp),
-            (Key::ArrowDown, Direction::Down, EditorAction::MoveDown),
-        ] {
-            if key(keycode) {
-                ctx.input_mut(|input| input.consume_key(modifiers, keycode));
-                self.action(if modifiers.alt {
-                    movement
-                } else {
-                    EditorAction::Navigate(direction)
-                });
-                return;
-            }
-        }
-        for (keycode, action) in [
-            (Key::Tab, EditorAction::AddChild),
-            (Key::Enter, EditorAction::AddSibling),
-            (Key::F2, EditorAction::Edit),
-            (Key::Space, EditorAction::Fold),
-            (Key::Backspace, EditorAction::Delete),
-            (Key::Delete, EditorAction::Delete),
-        ] {
-            if pressed.contains(&keycode) && key(keycode) {
-                ctx.input_mut(|input| input.consume_key(modifiers, keycode));
-                self.action(action);
-                break;
-            }
+        if let Some((keycode, command)) = bound {
+            ctx.input_mut(|input| input.consume_key(modifiers, keycode));
+            self.run_command(command, ctx);
         }
     }
 
@@ -930,17 +1016,17 @@ impl NativeApp {
         let background = if dark {
             Color32::from_rgb(22, 25, 33)
         } else {
-            Color32::from_rgb(247, 248, 251)
+            Color32::WHITE
         };
         ui.painter().rect_filled(available, 0.0, background);
         let canvas_response = ui.allocate_rect(available, Sense::click_and_drag());
         let center = point(available.center());
-        if canvas_response.dragged() {
+        if canvas_response.dragged_by(egui::PointerButton::Primary) && self.drag.is_none() {
             let delta = ui.input(|input| input.pointer.delta());
             self.viewport.pan.x += delta.x;
             self.viewport.pan.y += delta.y;
         }
-        if canvas_response.hovered() && self.editor.editing.is_none() {
+        if canvas_response.hovered() && self.editor.editing.is_none() && self.drag.is_none() {
             let zoom = ui.input(|input| {
                 let pinch = input.zoom_delta();
                 if (pinch - 1.0).abs() > 0.001 {
@@ -964,7 +1050,11 @@ impl NativeApp {
                 let galley = ui.painter().layout(
                     node.text.clone(),
                     FontId::proportional(if root { 22.0 } else { 16.0 }),
-                    ui.visuals().text_color(),
+                    if dark {
+                        Color32::from_gray(240)
+                    } else {
+                        Color32::BLACK
+                    },
                     260.0,
                 );
                 sizes.insert(
@@ -977,7 +1067,20 @@ impl NativeApp {
                 self.galleys.insert(id.clone(), galley);
             }
             match layout::layout(&self.editor.document, &sizes) {
-                Ok(placed) => self.placed = placed,
+                Ok(placed) => {
+                    self.branch_colors.clear();
+                    for child in &self.editor.document.nodes[&self.editor.document.root].children {
+                        self.branch_colors
+                            .insert(child.clone(), appearance::branch_color(child));
+                    }
+                    for (parent, child) in &placed.edges {
+                        if parent != &self.editor.document.root {
+                            self.branch_colors
+                                .insert(child.clone(), self.branch_colors[parent]);
+                        }
+                    }
+                    self.placed = placed;
+                }
                 Err(error) => self.error = Some(error.to_string()),
             }
             self.layout_revision = Some(self.editor.revision);
@@ -1002,26 +1105,22 @@ impl NativeApp {
             }
             self.focus_selected = false;
         }
-        let palette = [
-            Color32::from_rgb(100, 135, 230),
-            Color32::from_rgb(76, 165, 147),
-            Color32::from_rgb(188, 130, 208),
-            Color32::from_rgb(222, 162, 91),
-        ];
-        for (index, (parent, child)) in self.placed.edges.iter().enumerate() {
+        for (parent, child) in &self.placed.edges {
             let a = screen_rect(self.viewport, self.placed.nodes[parent], center);
             let b = screen_rect(self.viewport, self.placed.nodes[child], center);
             let right = b.center().x > a.center().x;
-            let start = if right {
+            let mut start = if right {
                 a.right_center()
             } else {
                 a.left_center()
             };
-            let end = if right {
-                b.left_center()
-            } else {
-                b.right_center()
-            };
+            if parent != &self.editor.document.root {
+                start.y = a.bottom() - 3.0 * self.viewport.zoom;
+            }
+            let end = Pos2::new(
+                if right { b.left() } else { b.right() },
+                b.bottom() - 3.0 * self.viewport.zoom,
+            );
             if !a.union(b).intersects(available) {
                 continue;
             }
@@ -1036,15 +1135,14 @@ impl NativeApp {
                     ],
                     false,
                     Color32::TRANSPARENT,
-                    Stroke::new(
-                        1.8 * self.viewport.zoom,
-                        palette[index % palette.len()].gamma_multiply(0.65),
-                    ),
+                    Stroke::new(1.5 * self.viewport.zoom, self.branch_colors[child]),
                 ));
         }
         let mut clicked = None;
         let mut edit = false;
         let mut fold = None;
+        let mut context_command = None;
+        let mut drag_started = None;
         let inline_composing = self.composing.is_some()
             || ui.input(|input| {
                 input
@@ -1075,34 +1173,44 @@ impl NativeApp {
             if !rect.intersects(available) {
                 continue;
             }
-            let selected = id == self.editor.selected;
+            let selected = self.editor.is_selected(&id);
             let node = &self.editor.document.nodes[&id];
-            let stroke = if selected {
-                Stroke::new(2.0, Color32::from_rgb(105, 139, 244))
-            } else {
-                Stroke::new(
-                    1.0,
-                    if dark {
-                        Color32::from_gray(61)
-                    } else {
-                        Color32::from_gray(220)
-                    },
-                )
-            };
-            let fill = if selected {
-                if dark {
-                    Color32::from_rgb(38, 48, 72)
+            let root = id == self.editor.document.root;
+            if root {
+                ui.painter().add(egui::epaint::EllipseShape {
+                    center: rect.center(),
+                    radius: rect.size() * 0.5,
+                    angle: 0.0,
+                    fill: background,
+                    stroke: Stroke::new(1.4, Color32::from_gray(if dark { 155 } else { 140 })),
+                });
+            }
+            if selected {
+                let highlight = if root {
+                    egui::Rect::from_center_size(
+                        rect.center(),
+                        self.galleys[&id].size() * self.viewport.zoom + Vec2::splat(8.0),
+                    )
                 } else {
-                    Color32::from_rgb(235, 240, 255)
-                }
-            } else if dark {
-                Color32::from_rgb(31, 35, 45)
-            } else {
-                Color32::WHITE
-            };
-            ui.painter().rect_filled(rect, 10.0, fill);
-            ui.painter()
-                .rect_stroke(rect, 10.0, stroke, egui::StrokeKind::Inside);
+                    rect.shrink(3.0 * self.viewport.zoom)
+                };
+                ui.painter().rect_filled(
+                    highlight,
+                    2.0,
+                    if dark {
+                        Color32::from_rgb(35, 62, 87)
+                    } else {
+                        Color32::from_rgb(218, 236, 255)
+                    },
+                );
+            }
+            if !root {
+                let y = rect.bottom() - 3.0 * self.viewport.zoom;
+                ui.painter().line_segment(
+                    [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                    Stroke::new(1.5 * self.viewport.zoom, self.branch_colors[&id]),
+                );
+            }
             if self
                 .editor
                 .editing
@@ -1140,7 +1248,8 @@ impl NativeApp {
                     edit_key = Some((EditorKey::Enter, response.id));
                 }
             } else {
-                let response = ui.interact(rect, Id::unique(("idea", &id)), Sense::click());
+                let response =
+                    ui.interact(rect, Id::unique(("idea", &id)), Sense::click_and_drag());
                 response.widget_info(|| {
                     egui::WidgetInfo::selected(
                         egui::Role::TreeItem,
@@ -1150,19 +1259,42 @@ impl NativeApp {
                     )
                 });
                 if response.clicked() {
-                    clicked = Some(id.clone());
+                    clicked = Some((id.clone(), ui.input(|input| input.modifiers.shift), false));
+                }
+                if response.secondary_clicked() {
+                    clicked = Some((id.clone(), false, true));
                 }
                 if response.double_clicked() {
-                    clicked = Some(id.clone());
+                    clicked = Some((id.clone(), false, false));
                     edit = true;
                 }
-                response.on_hover_text("Double-click to edit. Tab adds a child.");
+                if response.drag_started_by(egui::PointerButton::Primary) {
+                    response.request_focus();
+                    if root {
+                        self.status =
+                            "The central idea stays in place. Drag one of its branches instead."
+                                .into();
+                    } else {
+                        drag_started = Some(id.clone());
+                    }
+                }
+                response.context_menu(|ui| {
+                    if let Some(command) = self.context_menu(ui, &id, true) {
+                        context_command = Some(command);
+                        clicked = Some((id.clone(), false, true));
+                    }
+                });
+                response.on_hover_text("Double-click: edit. Drag: reorganize. Shift-click: multi-select. Right-click: commands.");
                 if let Some(galley) = self.galleys.get(&id) {
                     let text_pos = rect.center() - galley.size() * self.viewport.zoom * 0.5;
                     let mut shape = egui::epaint::TextShape::new(
                         Pos2::ZERO,
                         galley.clone(),
-                        ui.visuals().text_color(),
+                        if dark {
+                            Color32::from_gray(240)
+                        } else {
+                            Color32::BLACK
+                        },
                     );
                     shape.transform(egui::emath::TSTransform::new(
                         text_pos.to_vec2(),
@@ -1172,8 +1304,14 @@ impl NativeApp {
                 }
             }
             if !node.children.is_empty() {
+                let right = rect.center().x >= available.center().x + self.viewport.pan.x;
+                let edge = if right {
+                    rect.right_center()
+                } else {
+                    rect.left_center()
+                };
                 let fold_rect = egui::Rect::from_center_size(
-                    rect.right_center() + Vec2::new(11.0, 0.0),
+                    edge + Vec2::new(if right { 11.0 } else { -11.0 }, 0.0),
                     Vec2::splat(20.0),
                 );
                 let response = ui.put(
@@ -1197,8 +1335,16 @@ impl NativeApp {
             self.edit_focus = None;
             self.focus_selected = true;
         }
-        if let Some(id) = clicked {
-            let result = self.flush_details().and_then(|_| self.editor.select(&id));
+        if let Some((id, toggle, preserve)) = clicked {
+            let result = self.flush_details().and_then(|_| {
+                if toggle {
+                    self.editor.toggle_selection(&id)
+                } else if preserve {
+                    self.editor.activate_selection(&id)
+                } else {
+                    self.editor.select(&id)
+                }
+            });
             self.report(result);
             if edit {
                 self.action(EditorAction::Edit);
@@ -1218,6 +1364,27 @@ impl NativeApp {
                 .and_then(|_| self.editor.execute(Command::ToggleFold { id }));
             self.report(result);
         }
+        if let Some(id) = drag_started {
+            let result = self.prepare().and_then(|_| self.editor.select(&id));
+            if result.is_ok() {
+                self.drag = Some(DragSession::new(
+                    &self.editor.document,
+                    id,
+                    self.editor.revision,
+                ));
+                self.status = "Drag to the middle of a topic for a child, or its top/bottom to reorder. Escape cancels.".into();
+            }
+            self.report(result);
+        }
+        self.update_drag(ui, available, center);
+        canvas_response.context_menu(|ui| {
+            context_command = self
+                .context_menu(ui, &self.editor.selected, false)
+                .or(context_command);
+        });
+        if let Some(command) = context_command {
+            self.run_command(command, ui.ctx());
+        }
         if self.editor.document.nodes.len() == 1 && self.editor.editing.is_none() {
             ui.painter().text(
                 available.center() + Vec2::new(0.0, 100.0),
@@ -1226,6 +1393,166 @@ impl NativeApp {
                 FontId::proportional(15.0),
                 ui.visuals().weak_text_color(),
             );
+        }
+    }
+
+    fn update_drag(&mut self, ui: &mut egui::Ui, available: egui::Rect, center: Point) {
+        if !ui.is_enabled()
+            || self
+                .drag
+                .as_ref()
+                .is_some_and(|drag| drag.revision != self.editor.revision)
+            || ui.input(|input| input.viewport().focused == Some(false))
+        {
+            if self.drag.take().is_some() {
+                self.status =
+                    "Move canceled because the map, window focus or active dialog changed.".into();
+            }
+            return;
+        }
+        let Some(drag) = &mut self.drag else {
+            return;
+        };
+        let pointer = ui.input(|input| input.pointer.interact_pos());
+        let world = pointer
+            .filter(|pos| available.contains(*pos))
+            .map(|pos| self.viewport.to_world(point(pos), center));
+        drag.update(
+            &self.editor.document,
+            &self.placed,
+            world,
+            24.0 / self.viewport.zoom,
+        );
+        if ui.input(|input| input.pointer.button_released(egui::PointerButton::Primary)) {
+            let drag = self.drag.take().expect("active drag");
+            match drag.preview {
+                Some(preview) if preview.rejection.is_none() => {
+                    let before = self.editor.revision;
+                    let result = self.editor.execute(Command::MoveNode {
+                        id: drag.source,
+                        placement: preview.placement,
+                    });
+                    if result.is_ok() {
+                        self.focus_selected = true;
+                        self.status = if before == self.editor.revision {
+                            "Already in that position."
+                        } else {
+                            "Branch moved. Undo restores its previous position."
+                        }
+                        .into();
+                    }
+                    self.report(result);
+                }
+                Some(preview) => self.error = preview.rejection,
+                None => {
+                    self.status =
+                        "Move canceled: drop near a topic, or across the root to switch sides."
+                            .into()
+                }
+            }
+            return;
+        }
+        if !ui.input(|input| input.pointer.button_down(egui::PointerButton::Primary)) {
+            self.drag = None;
+            self.status =
+                "Move canceled because the pointer was released outside the window.".into();
+            return;
+        }
+        let drag = self.drag.as_ref().expect("active drag");
+        let rejected = drag
+            .preview
+            .as_ref()
+            .is_none_or(|preview| preview.rejection.is_some());
+        let accent = if rejected {
+            Color32::from_rgb(207, 67, 76)
+        } else {
+            Color32::from_rgb(38, 105, 220)
+        };
+        ui.ctx().set_cursor_icon(if rejected {
+            egui::CursorIcon::NoDrop
+        } else {
+            egui::CursorIcon::Grabbing
+        });
+        if let Some(preview) = &drag.preview {
+            let rect = screen_rect(self.viewport, self.placed.nodes[&preview.target], center);
+            match preview.placement {
+                MovePlacement::Before(_) | MovePlacement::After(_) => {
+                    let y = if matches!(preview.placement, MovePlacement::Before(_)) {
+                        rect.top() - 5.0
+                    } else {
+                        rect.bottom() + 5.0
+                    };
+                    ui.painter().line_segment(
+                        [
+                            Pos2::new(rect.left() - 5.0, y),
+                            Pos2::new(rect.right() + 5.0, y),
+                        ],
+                        Stroke::new(3.0, accent),
+                    );
+                    ui.painter()
+                        .circle_filled(Pos2::new(rect.left() - 5.0, y), 3.0, accent);
+                }
+                MovePlacement::Child(_) | MovePlacement::RootSide(_) => {
+                    ui.painter().rect_stroke(
+                        rect.expand(4.0),
+                        6.0,
+                        Stroke::new(2.5, accent),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+            }
+        }
+        if let Some(pointer) = pointer {
+            let title = ui.painter().layout(
+                drag.title.clone(),
+                FontId::proportional(14.0),
+                ui.visuals().strong_text_color(),
+                260.0,
+            );
+            let label = ui.painter().layout(
+                drag.preview
+                    .as_ref()
+                    .map_or("Drop near a topic; Escape cancels", |preview| {
+                        preview.label(&self.editor.document)
+                    })
+                    .into(),
+                FontId::proportional(12.0),
+                accent,
+                260.0,
+            );
+            let size = Vec2::new(
+                title.size().x.max(label.size().x) + 24.0,
+                title.size().y + label.size().y + 28.0,
+            );
+            let position = Pos2::new(
+                (pointer.x + 18.0)
+                    .min(available.right() - size.x)
+                    .max(available.left()),
+                (pointer.y + 22.0)
+                    .min(available.bottom() - size.y)
+                    .max(available.top()),
+            );
+            let rect = egui::Rect::from_min_size(position, size);
+            ui.painter().rect_filled(
+                rect.translate(Vec2::new(0.0, 3.0)),
+                8.0,
+                Color32::from_black_alpha(18),
+            );
+            ui.painter().rect_filled(rect, 8.0, ui.visuals().panel_fill);
+            ui.painter().rect_stroke(
+                rect,
+                8.0,
+                Stroke::new(1.0, accent),
+                egui::StrokeKind::Inside,
+            );
+            let label_y = title.size().y + 16.0;
+            ui.painter().galley(
+                position + Vec2::splat(12.0),
+                title,
+                ui.visuals().strong_text_color(),
+            );
+            ui.painter()
+                .galley(position + Vec2::new(12.0, label_y), label, accent);
         }
     }
 
@@ -1267,7 +1594,7 @@ impl NativeApp {
                 }
                 Dialog::Import => {
                     ui.heading("Import Freeplane map");
-                    ui.label("Original files stay untouched. The imported document saves as Branchline JSON.");
+                    ui.label("Original files stay untouched. The imported document saves as BMM JSON (.branchline).");
                     if let Some(report) = &self.editor.staged_import {
                         if report.warnings.is_empty() { ui.label("No unsupported fields detected within this supported subset."); }
                         else {
@@ -1289,12 +1616,17 @@ impl NativeApp {
                         if ui.button("Cancel").clicked() { keep = false; self.editor.cancel_import(); }
                     });
                 }
-                Dialog::Delete(id) => {
-                    ui.heading("Delete this branch?");
-                    ui.label("This removes the selected idea and all its descendants. You can undo it.");
+                Dialog::Delete(plan) => {
+                    ui.heading("Delete selected branches?");
+                    ui.label(format!("Remove {} branch(es), containing {} idea(s) in total. Undo restores the entire operation.", plan.roots.len(), plan.node_count));
+                    if plan.root_retained { ui.label("The central idea will be kept."); }
                     ui.horizontal(|ui| {
-                        if ui.button("Delete branch").clicked() {
-                            let result = self.editor.execute(Command::Delete { id: id.clone() });
+                        if ui.button("Delete selected branches").clicked() {
+                            let result = self.editor.execute(Command::DeleteMany { ids: plan.roots.clone() });
+                            if result.is_ok() {
+                                self.status = if plan.root_retained { "Selected branches deleted. The central idea was kept. Undo restores the deletion." }
+                                    else { "Selected branches deleted. Undo restores the deletion." }.into();
+                            }
                             self.report(result);
                             keep = false;
                         }

@@ -1,5 +1,5 @@
 use branchline::{
-    document::{Command, Document, History, Node, Side},
+    document::{Command, Document, History, MovePlacement, Node, Side},
     layout::layout,
 };
 use std::{collections::BTreeMap, time::Instant};
@@ -58,14 +58,40 @@ fn main() {
             std::hint::black_box(layout(&doc, &sizes).unwrap());
             times.push(start.elapsed().as_secs_f64() * 1_000.0);
         }
-        let cold = times.remove(0);
-        times.sort_by(f64::total_cmp);
-        println!(
-            "nodes={count} first_sample_ms={cold:.3} warm_n=20 median_ms={:.3} p95_ms={:.3}",
-            times[10], times[18]
-        );
-        if count == 1_000 {
-            assert!(times[18] < 100.0, "1,000-node p95 exceeds 100 ms goal");
+        report("edit_layout", count, times);
+        history = History::default();
+        let mut times = Vec::new();
+        for index in 0..21 {
+            let start = Instant::now();
+            history
+                .execute(
+                    &mut doc,
+                    Command::MoveNode {
+                        id: "node-5".into(),
+                        placement: MovePlacement::Child(
+                            if index % 2 == 0 { "node-2" } else { "node-1" }.into(),
+                        ),
+                    },
+                )
+                .unwrap();
+            std::hint::black_box(layout(&doc, &sizes).unwrap());
+            times.push(start.elapsed().as_secs_f64() * 1_000.0);
         }
+        report("move_layout", count, times);
+    }
+}
+
+fn report(operation: &str, count: usize, mut times: Vec<f64>) {
+    let first = times.remove(0);
+    times.sort_by(f64::total_cmp);
+    println!(
+        "operation={operation} nodes={count} first_sample_ms={first:.3} warm_n=20 median_ms={:.3} p95_ms={:.3}",
+        times[10], times[18]
+    );
+    if count == 1_000 {
+        assert!(
+            times[18] < 100.0,
+            "1,000-node {operation} p95 exceeds 100 ms goal"
+        );
     }
 }

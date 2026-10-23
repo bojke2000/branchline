@@ -3,7 +3,10 @@ use crate::{
     interchange::{FormatError, ImportReport, write_native},
     storage::{SaveCheckpoint, StorageError, atomic_write},
 };
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -64,6 +67,7 @@ pub struct EditBuffer {
 pub struct Editor {
     pub document: Document,
     pub selected: NodeId,
+    selection: BTreeSet<NodeId>,
     pub history: History,
     pub editing: Option<EditBuffer>,
     pub path: Option<PathBuf>,
@@ -89,6 +93,7 @@ impl Editor {
         checkpoint.mark_saved(&document);
         Self {
             selected: document.root.clone(),
+            selection: BTreeSet::from([document.root.clone()]),
             document,
             history: History::default(),
             editing: None,
@@ -139,12 +144,17 @@ impl Editor {
             .document
             .visible_ancestor(&self.selected)
             .unwrap_or_else(|| self.document.root.clone());
+        let visible = self.document.visible_nodes();
+        self.selection.retain(|id| visible.contains(id));
+        self.selection.insert(self.selected.clone());
     }
 
     pub fn execute(&mut self, command: Command) -> Result<(), EditorError> {
         let generation = self.history.generation;
-        if let Some(selected) = self.history.execute(&mut self.document, command)? {
-            self.selected = selected;
+        if let Some(selected) = self.history.execute(&mut self.document, command)?
+            && selected != self.selected
+        {
+            self.replace_selection(selected);
         }
         if self.history.generation != generation {
             self.changed();
@@ -174,10 +184,59 @@ impl Editor {
         if !self.document.nodes.contains_key(id) {
             return Err(EditorError::State("Unknown selection".into()));
         }
-        self.selected = self
+        let selected = self
             .document
             .visible_ancestor(id)
             .expect("validated selection");
+        self.replace_selection(selected);
+        Ok(())
+    }
+
+    fn replace_selection(&mut self, id: NodeId) {
+        self.selection = BTreeSet::from([id.clone()]);
+        self.selected = id;
+    }
+
+    pub fn selection(&self) -> &BTreeSet<NodeId> {
+        &self.selection
+    }
+
+    pub fn is_selected(&self, id: &str) -> bool {
+        self.selection.contains(id)
+    }
+
+    pub fn activate_selection(&mut self, id: &str) -> Result<(), EditorError> {
+        if self.selection.contains(id) {
+            self.commit_edit()?;
+            self.selected = id.into();
+            Ok(())
+        } else {
+            self.select(id)
+        }
+    }
+
+    pub fn toggle_selection(&mut self, id: &str) -> Result<(), EditorError> {
+        self.commit_edit()?;
+        let id = self
+            .document
+            .visible_ancestor(id)
+            .ok_or_else(|| EditorError::State("Unknown selection".into()))?;
+        if self.selection.contains(&id) {
+            if self.selection.len() > 1 {
+                self.selection.remove(&id);
+                if self.selected == id {
+                    self.selected = self
+                        .selection
+                        .iter()
+                        .next()
+                        .expect("nonempty selection")
+                        .clone();
+                }
+            }
+        } else {
+            self.selection.insert(id.clone());
+            self.selected = id;
+        }
         Ok(())
     }
 
@@ -206,7 +265,9 @@ impl Editor {
                 self.begin_edit();
                 None
             }
-            EditorAction::Delete => Some(Command::Delete { id }),
+            EditorAction::Delete => Some(Command::DeleteMany {
+                ids: self.selection.iter().cloned().collect(),
+            }),
             EditorAction::Fold => Some(Command::ToggleFold { id }),
             EditorAction::MoveUp => Some(Command::MoveSibling { id, delta: -1 }),
             EditorAction::MoveDown => Some(Command::MoveSibling { id, delta: 1 }),
@@ -325,7 +386,7 @@ impl Editor {
             }),
         };
         if let Some(target) = target {
-            self.selected = target;
+            self.replace_selection(target);
         }
     }
 
@@ -363,7 +424,7 @@ impl Editor {
     ) -> Result<(), EditorError> {
         document.validate()?;
         self.document = document;
-        self.selected = self.document.root.clone();
+        self.replace_selection(self.document.root.clone());
         self.history = History::default();
         self.editing = None;
         self.path = path;

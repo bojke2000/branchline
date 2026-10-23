@@ -10,7 +10,9 @@ fn palette_filtering_dispatches_real_actions() {
     let commands = palette_matches("child");
     assert_eq!(commands.len(), 1);
     let mut editor = Editor::new();
-    editor.dispatch(commands[0].action).unwrap();
+    editor
+        .dispatch(commands[0].action.editor_action().unwrap())
+        .unwrap();
     assert_eq!(editor.document.nodes.len(), 2);
     assert!(palette_matches("does-not-exist").is_empty());
 }

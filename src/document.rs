@@ -56,6 +56,28 @@ pub struct Document {
 #[error("{0}")]
 pub struct DocumentError(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MovePlacement {
+    Child(NodeId),
+    Before(NodeId),
+    After(NodeId),
+    RootSide(Side),
+}
+
+pub struct MovePlan {
+    source_parent: NodeId,
+    destination_parent: NodeId,
+    index: usize,
+    side: Side,
+}
+
+pub struct DeletionPlan {
+    pub roots: Vec<NodeId>,
+    pub node_count: usize,
+    pub root_retained: bool,
+    removed: BTreeSet<NodeId>,
+}
+
 impl Document {
     pub fn new(text: &str) -> Self {
         let node = Node::new(text, Side::Right);
@@ -84,6 +106,19 @@ impl Document {
             current = parent;
         }
         Some(visible.to_owned())
+    }
+
+    pub fn visible_nodes(&self) -> BTreeSet<&NodeId> {
+        let mut visible = BTreeSet::new();
+        let mut pending = vec![&self.root];
+        while let Some(id) = pending.pop() {
+            visible.insert(id);
+            let node = &self.nodes[id];
+            if !node.folded {
+                pending.extend(&node.children);
+            }
+        }
+        visible
     }
 
     pub fn validate(&self) -> Result<(), DocumentError> {
@@ -158,6 +193,212 @@ impl Document {
             .ok_or_else(|| DocumentError("This action requires a non-root node".into()))
     }
 
+    fn parent_index(&self) -> BTreeMap<&str, &str> {
+        self.nodes
+            .values()
+            .flat_map(|node| {
+                node.children
+                    .iter()
+                    .map(|child| (child.as_str(), node.id.as_str()))
+            })
+            .collect()
+    }
+
+    pub fn plan_move(
+        &self,
+        id: &str,
+        placement: &MovePlacement,
+    ) -> Result<MovePlan, DocumentError> {
+        let node = self
+            .nodes
+            .get(id)
+            .ok_or_else(|| DocumentError("Unknown source node".into()))?;
+        if id == self.root {
+            return Err(DocumentError("The central idea cannot be moved".into()));
+        }
+        let parents = self.parent_index();
+        let source_parent = *parents
+            .get(id)
+            .ok_or_else(|| DocumentError("Missing source parent".into()))?;
+        let (destination_parent, relative, side) = match placement {
+            MovePlacement::Child(parent) => {
+                let parent_node = self
+                    .nodes
+                    .get(parent)
+                    .ok_or_else(|| DocumentError("Unknown destination".into()))?;
+                (
+                    parent.as_str(),
+                    None,
+                    if parent == &self.root {
+                        node.side
+                    } else {
+                        parent_node.side
+                    },
+                )
+            }
+            MovePlacement::RootSide(side) => (self.root.as_str(), None, *side),
+            MovePlacement::Before(sibling) | MovePlacement::After(sibling) => {
+                if sibling == id {
+                    return Err(DocumentError(
+                        "An idea cannot be dropped onto itself".into(),
+                    ));
+                }
+                let parent = *parents.get(sibling.as_str()).ok_or_else(|| {
+                    DocumentError("Destination must be a non-root sibling".into())
+                })?;
+                (
+                    parent,
+                    Some((
+                        sibling.as_str(),
+                        matches!(placement, MovePlacement::After(_)),
+                    )),
+                    self.nodes[sibling].side,
+                )
+            }
+        };
+        let mut ancestor = destination_parent;
+        let mut depth = 1;
+        loop {
+            if ancestor == id {
+                return Err(DocumentError(
+                    "A branch cannot be moved into itself or its descendants".into(),
+                ));
+            }
+            if depth > MAX_DEPTH {
+                return Err(DocumentError(
+                    "Destination exceeds maximum tree depth".into(),
+                ));
+            }
+            match parents.get(ancestor) {
+                Some(parent) => {
+                    ancestor = parent;
+                    depth += 1;
+                }
+                None => break,
+            }
+        }
+        let mut pending = vec![(id, 1)];
+        while let Some((current, height)) = pending.pop() {
+            if depth + height > MAX_DEPTH {
+                return Err(DocumentError(
+                    "Move would exceed maximum tree depth of 256".into(),
+                ));
+            }
+            pending.extend(
+                self.nodes[current]
+                    .children
+                    .iter()
+                    .map(|child| (child.as_str(), height + 1)),
+            );
+        }
+        let children: Vec<_> = self.nodes[destination_parent]
+            .children
+            .iter()
+            .filter(|child| child.as_str() != id)
+            .collect();
+        let index = if let Some((sibling, after)) = relative {
+            children
+                .iter()
+                .position(|child| child.as_str() == sibling)
+                .expect("validated sibling")
+                + usize::from(after)
+        } else if matches!(placement, MovePlacement::RootSide(side) if *side == node.side)
+            && source_parent == self.root
+        {
+            self.nodes[source_parent]
+                .children
+                .iter()
+                .position(|child| child == id)
+                .expect("source membership")
+        } else {
+            children.len()
+        };
+        Ok(MovePlan {
+            source_parent: source_parent.into(),
+            destination_parent: destination_parent.into(),
+            index,
+            side,
+        })
+    }
+
+    fn move_node(
+        &mut self,
+        id: NodeId,
+        placement: MovePlacement,
+    ) -> Result<Option<NodeId>, DocumentError> {
+        let plan = self.plan_move(&id, &placement)?;
+        self.node_mut(&plan.source_parent)?
+            .children
+            .retain(|child| child != &id);
+        let destination = self.node_mut(&plan.destination_parent)?;
+        destination.children.insert(plan.index, id.clone());
+        destination.folded = false;
+        self.set_subtree_side(&id, plan.side)?;
+        Ok(Some(id))
+    }
+
+    pub fn plan_deletion(&self, ids: &[NodeId]) -> Result<DeletionPlan, DocumentError> {
+        let mut selected: BTreeSet<_> = ids.iter().cloned().collect();
+        if selected.iter().any(|id| !self.nodes.contains_key(id)) {
+            return Err(DocumentError("Selection includes an unknown node".into()));
+        }
+        let root_retained = selected.remove(&self.root);
+        if selected.is_empty() {
+            return Err(DocumentError(
+                "The central idea cannot be deleted; select another idea".into(),
+            ));
+        }
+        let mut roots = Vec::new();
+        let mut removed = BTreeSet::new();
+        let mut pending = vec![(self.root.clone(), false)];
+        while let Some((id, selected_ancestor)) = pending.pop() {
+            let selected_here = selected.contains(&id);
+            if selected_here && !selected_ancestor {
+                roots.push(id.clone());
+            }
+            let remove = selected_ancestor || selected_here;
+            pending.extend(
+                self.nodes[&id]
+                    .children
+                    .iter()
+                    .rev()
+                    .map(|child| (child.clone(), remove)),
+            );
+            if remove {
+                removed.insert(id);
+            }
+        }
+        Ok(DeletionPlan {
+            roots,
+            node_count: removed.len(),
+            root_retained,
+            removed,
+        })
+    }
+
+    fn delete_many(&mut self, ids: Vec<NodeId>) -> Result<Option<NodeId>, DocumentError> {
+        let plan = self.plan_deletion(&ids)?;
+        let parent = self.parent_owned(&plan.roots[0])?;
+        for node in self.nodes.values_mut() {
+            node.children.retain(|id| !plan.removed.contains(id));
+        }
+        for id in plan.removed {
+            self.nodes.remove(&id);
+        }
+        Ok(Some(parent))
+    }
+
+    fn siblings_on_side(&self, id: &str, parent: &str) -> Vec<NodeId> {
+        self.nodes[parent]
+            .children
+            .iter()
+            .filter(|sibling| {
+                parent != self.root || self.nodes[*sibling].side == self.nodes[id].side
+            })
+            .cloned()
+            .collect()
+    }
+
     fn apply(&mut self, command: Command) -> Result<Option<NodeId>, DocumentError> {
         match command {
             Command::AddChild { parent, text } => {
@@ -201,11 +442,11 @@ impl Document {
             }
             Command::SetNotes { id, notes } => {
                 self.node_mut(&id)?.notes = notes;
-                Ok(Some(id))
+                Ok(None)
             }
             Command::SetLink { id, link } => {
                 self.node_mut(&id)?.link = link;
-                Ok(Some(id))
+                Ok(None)
             }
             Command::ToggleFold { id } => {
                 let node = self.node_mut(&id)?;
@@ -219,24 +460,12 @@ impl Document {
                 self.reveal(&id);
                 Ok(Some(id))
             }
-            Command::Delete { id } => {
-                let parent = self.parent_owned(&id)?;
-                self.node_mut(&parent)?
-                    .children
-                    .retain(|child| child != &id);
-                let mut pending = vec![id];
-                while let Some(id) = pending.pop() {
-                    let node = self
-                        .nodes
-                        .remove(&id)
-                        .ok_or_else(|| DocumentError("Unknown node".into()))?;
-                    pending.extend(node.children);
-                }
-                Ok(Some(parent))
-            }
+            Command::Delete { id } => self.delete_many(vec![id]),
+            Command::DeleteMany { ids } => self.delete_many(ids),
+            Command::MoveNode { id, placement } => self.move_node(id, placement),
             Command::MoveSibling { id, delta } => {
                 let parent = self.parent_owned(&id)?;
-                let children = &mut self.node_mut(&parent)?.children;
+                let children = self.siblings_on_side(&id, &parent);
                 let index = children
                     .iter()
                     .position(|child| child == &id)
@@ -244,14 +473,21 @@ impl Document {
                 let target = index
                     .checked_add_signed(delta)
                     .filter(|index| *index < children.len());
-                if let Some(target) = target {
-                    children.swap(index, target);
+                if let Some(target) = target
+                    && target != index
+                {
+                    let placement = if target < index {
+                        MovePlacement::Before(children[target].clone())
+                    } else {
+                        MovePlacement::After(children[target].clone())
+                    };
+                    return self.move_node(id, placement);
                 }
                 Ok(Some(id))
             }
             Command::Indent { id } => {
                 let parent = self.parent_owned(&id)?;
-                let children = &self.nodes[&parent].children;
+                let children = self.siblings_on_side(&id, &parent);
                 let index = children
                     .iter()
                     .position(|child| child == &id)
@@ -260,26 +496,11 @@ impl Document {
                     return Err(DocumentError("No preceding sibling to indent under".into()));
                 }
                 let destination = children[index - 1].clone();
-                self.node_mut(&parent)?.children.remove(index);
-                self.node_mut(&destination)?.children.push(id.clone());
-                self.node_mut(&destination)?.folded = false;
-                self.set_subtree_side(&id, self.nodes[&destination].side)?;
-                Ok(Some(id))
+                self.move_node(id, MovePlacement::Child(destination))
             }
             Command::Outdent { id } => {
                 let parent = self.parent_owned(&id)?;
-                let grandparent = self.parent_owned(&parent)?;
-                self.node_mut(&parent)?
-                    .children
-                    .retain(|child| child != &id);
-                let children = &mut self.node_mut(&grandparent)?.children;
-                let index = children
-                    .iter()
-                    .position(|child| child == &parent)
-                    .expect("parent membership");
-                children.insert(index + 1, id.clone());
-                self.set_subtree_side(&id, self.nodes[&parent].side)?;
-                Ok(Some(id))
+                self.move_node(id, MovePlacement::After(parent))
             }
         }
     }
@@ -297,17 +518,52 @@ impl Document {
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    AddChild { parent: NodeId, text: String },
-    AddSibling { sibling: NodeId, text: String },
-    SetText { id: NodeId, text: String },
-    SetNotes { id: NodeId, notes: String },
-    SetLink { id: NodeId, link: String },
-    Delete { id: NodeId },
-    ToggleFold { id: NodeId },
-    Reveal { id: NodeId },
-    MoveSibling { id: NodeId, delta: isize },
-    Indent { id: NodeId },
-    Outdent { id: NodeId },
+    AddChild {
+        parent: NodeId,
+        text: String,
+    },
+    AddSibling {
+        sibling: NodeId,
+        text: String,
+    },
+    SetText {
+        id: NodeId,
+        text: String,
+    },
+    SetNotes {
+        id: NodeId,
+        notes: String,
+    },
+    SetLink {
+        id: NodeId,
+        link: String,
+    },
+    Delete {
+        id: NodeId,
+    },
+    DeleteMany {
+        ids: Vec<NodeId>,
+    },
+    ToggleFold {
+        id: NodeId,
+    },
+    Reveal {
+        id: NodeId,
+    },
+    MoveSibling {
+        id: NodeId,
+        delta: isize,
+    },
+    Indent {
+        id: NodeId,
+    },
+    Outdent {
+        id: NodeId,
+    },
+    MoveNode {
+        id: NodeId,
+        placement: MovePlacement,
+    },
 }
 
 #[derive(Default)]

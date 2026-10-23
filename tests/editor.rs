@@ -93,3 +93,37 @@ fn no_op_metadata_does_not_invalidate_layout() {
     assert_eq!(editor.revision, revision);
     assert!(!editor.is_dirty());
 }
+
+#[test]
+fn multi_selection_toggles_and_drops_hidden_nodes_after_undo() {
+    let mut editor = Editor::new();
+    editor.dispatch(EditorAction::AddChild).unwrap();
+    let parent = editor.selected.clone();
+    editor.dispatch(EditorAction::AddChild).unwrap();
+    editor.commit_edit().unwrap();
+    let hidden = editor.selected.clone();
+    let root = editor.document.root.clone();
+    editor.select(&root).unwrap();
+    editor.dispatch(EditorAction::AddChild).unwrap();
+    editor.commit_edit().unwrap();
+    let other = editor.selected.clone();
+    editor.select(&parent).unwrap();
+    editor.dispatch(EditorAction::Fold).unwrap();
+    editor.reveal_selection(&hidden).unwrap();
+    editor.toggle_selection(&other).unwrap();
+    assert_eq!(editor.selection().len(), 2);
+    editor.toggle_selection(&other).unwrap();
+    assert_eq!(editor.selection().len(), 1);
+    assert_eq!(editor.selected, hidden);
+    editor.toggle_selection(&other).unwrap();
+    editor.dispatch(EditorAction::Undo).unwrap();
+    assert_eq!(editor.selected, other);
+    assert!(
+        !editor.is_selected(&hidden),
+        "Invisible nodes must not remain batch-delete targets"
+    );
+    editor.dispatch(EditorAction::Delete).unwrap();
+    assert!(editor.document.nodes.contains_key(&parent));
+    assert!(editor.document.nodes.contains_key(&hidden));
+    assert!(!editor.document.nodes.contains_key(&other));
+}
