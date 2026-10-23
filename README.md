@@ -116,17 +116,25 @@ The tests cover semantic edits/history, invalid graphs, XML loss warnings,
 interchange round trips, atomic-save failures, recovery locks/identity,
 dirty-state checkpoints, staged import cancellation, keyboard edit modes,
 deterministic layout, zoom/focus and actual headless egui input routing.
+Review regressions also cover offscreen inline creation, folded/undo selection
+visibility, abandoned IME ownership and cancellation of recovered drafts.
+
+Executed on this Mac: `cargo fmt --check` passed;
+`cargo clippy --all-targets -- -D warnings` passed;
+`cargo test --locked` passed (30 integration tests);
+`cargo build --release --locked` and `sh scripts/bundle.sh` passed.
+These results do not establish the unverified native scenarios listed below.
 
 Measured on this development Mac, optimized generated-map edit plus layout:
 
 | Nodes | First sample | Warm median (20) | Warm p95 |
 | --- | --- | --- | --- |
-| 100 | 0.127 ms | 0.084 ms | 0.093 ms |
-| 1,000 | 1.102 ms | 0.960 ms | 1.017 ms |
-| 10,000 | 11.405 ms | 11.436 ms | 11.692 ms |
+| 100 | 0.115 ms | 0.077 ms | 0.085 ms |
+| 1,000 | 1.041 ms | 0.931 ms | 0.958 ms |
+| 10,000 | 11.262 ms | 11.381 ms | 11.475 ms |
 
 The sampled process used 0.27 s elapsed, 0.26 s user CPU and <0.01 s system
-CPU, with maximum resident size 56,590,336 bytes. The benchmark process had no
+CPU, with maximum resident size 61,571,072 bytes. The benchmark process had no
 children; this is not UI renderer memory. First samples are not guaranteed
 cold OS-cache measurements. Rendering, text measurement, dialogs and real
 interaction are excluded. There is no equivalent Freeplane benchmark or

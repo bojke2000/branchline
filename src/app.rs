@@ -71,6 +71,7 @@ pub struct Editor {
     pub pending: Option<PendingAction>,
     pub staged_import: Option<ImportReport>,
     pub revision: u64,
+    pub draft_revision: u64,
     checkpoint: SaveCheckpoint,
     dirty: bool,
 }
@@ -96,6 +97,7 @@ impl Editor {
             pending: None,
             staged_import: None,
             revision: 0,
+            draft_revision: 0,
             checkpoint,
             dirty: false,
         }
@@ -129,9 +131,14 @@ impl Editor {
     fn changed(&mut self) {
         self.revision = self.revision.wrapping_add(1);
         self.dirty = self.checkpoint.is_dirty(&self.document);
-        if !self.document.nodes.contains_key(&self.selected) {
-            self.selected = self.document.root.clone();
-        }
+        self.reconcile_selection();
+    }
+
+    fn reconcile_selection(&mut self) {
+        self.selected = self
+            .document
+            .visible_ancestor(&self.selected)
+            .unwrap_or_else(|| self.document.root.clone());
     }
 
     pub fn execute(&mut self, command: Command) -> Result<(), EditorError> {
@@ -141,6 +148,8 @@ impl Editor {
         }
         if self.history.generation != generation {
             self.changed();
+        } else {
+            self.reconcile_selection();
         }
         Ok(())
     }
@@ -155,6 +164,7 @@ impl Editor {
                 self.editing = Some(buffer);
                 return Err(error);
             }
+            self.draft_revision = self.draft_revision.wrapping_add(1);
         }
         Ok(())
     }
@@ -164,7 +174,10 @@ impl Editor {
         if !self.document.nodes.contains_key(id) {
             return Err(EditorError::State("Unknown selection".into()));
         }
-        self.selected = id.into();
+        self.selected = self
+            .document
+            .visible_ancestor(id)
+            .expect("validated selection");
         Ok(())
     }
 
@@ -226,6 +239,7 @@ impl Editor {
     }
 
     fn begin_edit(&mut self) {
+        self.draft_revision = self.draft_revision.wrapping_add(1);
         self.editing = Some(EditBuffer {
             id: self.selected.clone(),
             text: self.document.nodes[&self.selected].text.clone(),
@@ -243,7 +257,10 @@ impl Editor {
         }
         if self.editing.is_some() {
             match key {
-                EditorKey::Escape => self.editing = None,
+                EditorKey::Escape => {
+                    self.editing = None;
+                    self.draft_revision = self.draft_revision.wrapping_add(1);
+                }
                 EditorKey::Enter => self.commit_edit()?,
                 EditorKey::Tab => {
                     self.commit_edit()?;
@@ -274,10 +291,14 @@ impl Editor {
                     Side::Right
                 };
                 if node.id == self.document.root {
-                    node.children
-                        .iter()
-                        .find(|id| self.document.nodes[*id].side == side)
-                        .cloned()
+                    if node.folded {
+                        None
+                    } else {
+                        node.children
+                            .iter()
+                            .find(|id| self.document.nodes[*id].side == side)
+                            .cloned()
+                    }
                 } else if node.side != side {
                     parent.map(str::to_owned)
                 } else if !node.folded {

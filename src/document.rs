@@ -73,6 +73,19 @@ impl Document {
             .map(|node| node.id.as_str())
     }
 
+    pub fn visible_ancestor(&self, id: &str) -> Option<NodeId> {
+        self.nodes.get(id)?;
+        let mut visible = id;
+        let mut current = id;
+        while let Some(parent) = self.parent(current) {
+            if self.nodes[parent].folded {
+                visible = parent;
+            }
+            current = parent;
+        }
+        Some(visible.to_owned())
+    }
+
     pub fn validate(&self) -> Result<(), DocumentError> {
         let fail = |message: &str| Err(DocumentError(message.into()));
         if self.version != 1 {

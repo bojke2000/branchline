@@ -143,9 +143,9 @@ pub struct NativeApp {
     palette_focus: bool,
     help_open: bool,
     edit_focus: Option<NodeId>,
-    composing: bool,
+    composing: Option<Id>,
     allow_close: bool,
-    recovery_revision: Option<u64>,
+    recovery_revision: Option<(u64, u64)>,
     last_change: Instant,
 }
 
@@ -177,7 +177,7 @@ impl NativeApp {
             palette_focus: false,
             help_open: false,
             edit_focus: None,
-            composing: false,
+            composing: None,
             allow_close: false,
             recovery_revision: None,
             last_change: Instant::now(),
@@ -448,6 +448,7 @@ impl NativeApp {
             }
         }
         let before = self.editor.revision;
+        let draft_before = self.editor.draft_revision;
         if self.dialog.is_none() {
             self.shortcuts(&ctx);
         }
@@ -614,22 +615,23 @@ impl NativeApp {
                     );
                 });
         }
-        if self.editor.revision != before {
+        if self.editor.revision != before || self.editor.draft_revision != draft_before {
             self.last_change = Instant::now();
             self.recovery_revision = None;
         }
         if self.dialog.is_none()
             && self.recovery.is_none()
-            && self.recovery_revision != Some(self.editor.revision)
+            && self.recovery_revision != Some((self.editor.revision, self.editor.draft_revision))
         {
             if self.last_change.elapsed() >= Duration::from_millis(700)
-                && self.recovery_revision != Some(self.editor.revision)
+                && self.recovery_revision
+                    != Some((self.editor.revision, self.editor.draft_revision))
             {
                 match self.checkpoint_recovery() {
                     Ok(()) => self.status = "Recovery snapshot updated locally.".into(),
                     Err(error) => self.error = Some(format!("Recovery unavailable: {error}")),
                 }
-                self.recovery_revision = Some(self.editor.revision);
+                self.recovery_revision = Some((self.editor.revision, self.editor.draft_revision));
             }
             ctx.request_repaint_after(Duration::from_millis(700));
         }
@@ -812,16 +814,20 @@ impl NativeApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        let focused = ctx.memory(|memory| memory.focused());
+        if self.composing.is_some() && self.composing != focused {
+            self.composing = None;
+        }
         for event in ctx.input(|input| input.events.clone()) {
             match event {
                 egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
-                    self.composing = !text.is_empty()
+                    self.composing = if text.is_empty() { None } else { focused };
                 }
-                egui::Event::Ime(egui::ImeEvent::Commit(_)) => self.composing = false,
+                egui::Event::Ime(egui::ImeEvent::Commit(_)) => self.composing = None,
                 _ => {}
             }
         }
-        if self.composing || self.palette_open || self.help_open {
+        if self.composing.is_some() || self.palette_open || self.help_open {
             return;
         }
         let (modifiers, pressed) = ctx.input(|input| (input.modifiers, input.keys_down.clone()));
@@ -1039,7 +1045,30 @@ impl NativeApp {
         let mut clicked = None;
         let mut edit = false;
         let mut fold = None;
-        let mut edit_key = None;
+        let inline_composing = self.composing.is_some()
+            || ui.input(|input| {
+                input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Ime(_)))
+            });
+        let mut edit_key = self.editor.editing.as_ref().and_then(|buffer| {
+            if inline_composing {
+                return None;
+            }
+            let key = ui.input(|input| {
+                if input.key_pressed(Key::Escape) {
+                    Some(EditorKey::Escape)
+                } else if input.key_pressed(Key::Tab) {
+                    Some(EditorKey::Tab)
+                } else if input.key_pressed(Key::Enter) {
+                    Some(EditorKey::Enter)
+                } else {
+                    None
+                }
+            });
+            key.map(|key| (key, Id::unique(("inline", &buffer.id))))
+        });
         let ids: Vec<_> = self.placed.nodes.keys().cloned().collect();
         for id in ids {
             let rect = screen_rect(self.viewport, self.placed.nodes[&id], center);
@@ -1081,24 +1110,6 @@ impl NativeApp {
                 .is_some_and(|buffer| buffer.id == id)
             {
                 let first_focus = self.edit_focus.as_ref() != Some(&id);
-                let key = ui.input(|input| {
-                    if input.key_pressed(Key::Escape) {
-                        Some(EditorKey::Escape)
-                    } else if input.key_pressed(Key::Tab) {
-                        Some(EditorKey::Tab)
-                    } else if input.key_pressed(Key::Enter) {
-                        Some(EditorKey::Enter)
-                    } else {
-                        None
-                    }
-                });
-                let composing = self.composing
-                    || ui.input(|input| {
-                        input
-                            .events
-                            .iter()
-                            .any(|event| matches!(event, egui::Event::Ime(_)))
-                    });
                 let buffer = self.editor.editing.as_mut().expect("editing node");
                 let response = ui.put(
                     rect.shrink(7.0),
@@ -1124,12 +1135,9 @@ impl NativeApp {
                         state.store(ui.ctx(), response.id);
                     }
                 }
-                if !composing {
-                    if let Some(key) = key {
-                        edit_key = Some((key, response.id));
-                    } else if response.lost_focus() && !first_focus {
-                        edit_key = Some((EditorKey::Enter, response.id));
-                    }
+                if !inline_composing && edit_key.is_none() && response.lost_focus() && !first_focus
+                {
+                    edit_key = Some((EditorKey::Enter, response.id));
                 }
             } else {
                 let response = ui.interact(rect, Id::unique(("idea", &id)), Sense::click());
@@ -1187,6 +1195,7 @@ impl NativeApp {
                 ui.memory_mut(|memory| memory.surrender_focus(focus));
             }
             self.edit_focus = None;
+            self.focus_selected = true;
         }
         if let Some(id) = clicked {
             let result = self.flush_details().and_then(|_| self.editor.select(&id));
