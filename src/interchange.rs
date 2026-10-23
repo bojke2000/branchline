@@ -94,7 +94,10 @@ pub fn import_mm(bytes: &[u8]) -> Result<ImportReport, FormatError> {
                     if attribute.value.len() > MAX_FIELD_BYTES {
                         return Err(error("XML attribute exceeds 1 MiB"));
                     }
-                    let value = attribute.normalized_value(XmlVersion::Implicit1_0).map_err(error)?.into_owned();
+                    let value = attribute
+                        .normalized_value(XmlVersion::Implicit1_0)
+                        .map_err(error)?
+                        .into_owned();
                     text_bytes += value.len();
                     if text_bytes > MAX_TEXT_BYTES {
                         return Err(error("Decoded text exceeds 64 MiB"));
@@ -118,7 +121,9 @@ pub fn import_mm(bytes: &[u8]) -> Result<ImportReport, FormatError> {
                         if nodes.len() >= MAX_NODES {
                             return Err(error("Map exceeds 100,000 nodes"));
                         }
-                        let id = attrs.remove("ID").unwrap_or_else(|| Uuid::new_v4().to_string());
+                        let id = attrs
+                            .remove("ID")
+                            .unwrap_or_else(|| Uuid::new_v4().to_string());
                         if id.is_empty() || nodes.contains_key(&id) {
                             return Err(error(format!("Empty or duplicate node ID: {id}")));
                         }
@@ -150,7 +155,11 @@ pub fn import_mm(bytes: &[u8]) -> Result<ImportReport, FormatError> {
                             warn(&mut warnings, format!("attribute:{key}"), &id);
                         }
                         if let Some(Frame::Node(parent)) = &parent {
-                            nodes.get_mut(parent).expect("parsed parent").children.push(id.clone());
+                            nodes
+                                .get_mut(parent)
+                                .expect("parsed parent")
+                                .children
+                                .push(id.clone());
                         } else if root.replace(id.clone()).is_some() {
                             return Err(error("Map must contain exactly one root node"));
                         }
@@ -159,8 +168,14 @@ pub fn import_mm(bytes: &[u8]) -> Result<ImportReport, FormatError> {
                     }
                     ("richcontent", Some(Frame::Node(id)))
                         if attrs.get("TYPE").map(String::as_str) == Some("NOTE")
-                            && attrs.get("CONTENT-TYPE").is_some_and(|value| value.starts_with("plain/")) => {
-                        for key in attrs.keys().filter(|key| !["TYPE", "CONTENT-TYPE"].contains(&key.as_str())) {
+                            && attrs
+                                .get("CONTENT-TYPE")
+                                .is_some_and(|value| value.starts_with("plain/")) =>
+                    {
+                        for key in attrs
+                            .keys()
+                            .filter(|key| !["TYPE", "CONTENT-TYPE"].contains(&key.as_str()))
+                        {
                             warn(&mut warnings, format!("attribute:{key}"), id);
                         }
                         if !nodes[id].notes.is_empty() {
@@ -169,7 +184,14 @@ pub fn import_mm(bytes: &[u8]) -> Result<ImportReport, FormatError> {
                         Frame::Note(id.clone())
                     }
                     ("richcontent", _) => {
-                        warn(&mut warnings, format!("richcontent:{}", attrs.get("TYPE").map(String::as_str).unwrap_or("unknown")), location);
+                        warn(
+                            &mut warnings,
+                            format!(
+                                "richcontent:{}",
+                                attrs.get("TYPE").map(String::as_str).unwrap_or("unknown")
+                            ),
+                            location,
+                        );
                         Frame::Unsupported
                     }
                     (_, None) => return Err(error("Expected a single <map> document")),
@@ -188,20 +210,39 @@ pub fn import_mm(bytes: &[u8]) -> Result<ImportReport, FormatError> {
                     return Err(error("Unexpected closing element"));
                 }
             }
-            Event::Text(text) => append_text(text.as_ref(), &frames, &mut nodes, &mut text_bytes, &mut warnings)?,
-            Event::CData(text) => append_text(text.as_ref(), &frames, &mut nodes, &mut text_bytes, &mut warnings)?,
+            Event::Text(text) => append_text(
+                text.as_ref(),
+                &frames,
+                &mut nodes,
+                &mut text_bytes,
+                &mut warnings,
+            )?,
+            Event::CData(text) => append_text(
+                text.as_ref(),
+                &frames,
+                &mut nodes,
+                &mut text_bytes,
+                &mut warnings,
+            )?,
             Event::GeneralRef(reference) => {
                 let value = if let Some(character) = reference.resolve_char_ref().map_err(error)? {
                     character.to_string()
                 } else {
                     match reference.as_ref() {
-                        "amp" => "&", "lt" => "<", "gt" => ">", "quot" => "\"", "apos" => "'",
+                        "amp" => "&",
+                        "lt" => "<",
+                        "gt" => ">",
+                        "quot" => "\"",
+                        "apos" => "'",
                         _ => return Err(error("Unknown XML entity")),
-                    }.to_owned()
+                    }
+                    .to_owned()
                 };
                 append_text(&value, &frames, &mut nodes, &mut text_bytes, &mut warnings)?;
             }
-            Event::DocType(_) => return Err(error("DTD and entity declarations are not supported")),
+            Event::DocType(_) => {
+                return Err(error("DTD and entity declarations are not supported"));
+            }
             Event::PI(_) => warn(&mut warnings, "processing-instruction".into(), "map"),
             Event::Eof => break,
             _ => {}
@@ -210,22 +251,41 @@ pub fn import_mm(bytes: &[u8]) -> Result<ImportReport, FormatError> {
     if !frames.is_empty() {
         return Err(error("Unclosed XML elements"));
     }
-    let document = Document { version: 1, root: root.ok_or_else(|| error("Map has no root node"))?, nodes };
+    let document = Document {
+        version: 1,
+        root: root.ok_or_else(|| error("Map has no root node"))?,
+        nodes,
+    };
     document.validate().map_err(error)?;
-    Ok(ImportReport { document, warnings: warnings.into_values().collect() })
+    Ok(ImportReport {
+        document,
+        warnings: warnings.into_values().collect(),
+    })
 }
 
-fn append_text(text: &str, frames: &[Frame], nodes: &mut BTreeMap<String, Node>, bytes: &mut usize, warnings: &mut BTreeMap<String, ImportWarning>) -> Result<(), FormatError> {
+fn append_text(
+    text: &str,
+    frames: &[Frame],
+    nodes: &mut BTreeMap<String, Node>,
+    bytes: &mut usize,
+    warnings: &mut BTreeMap<String, ImportWarning>,
+) -> Result<(), FormatError> {
     *bytes += text.len();
-    if *bytes > MAX_TEXT_BYTES { return Err(error("Decoded text exceeds 64 MiB")); }
+    if *bytes > MAX_TEXT_BYTES {
+        return Err(error("Decoded text exceeds 64 MiB"));
+    }
     match frames.last() {
         Some(Frame::Note(id)) => {
             let notes = &mut nodes.get_mut(id).expect("parsed note owner").notes;
-            if notes.len() + text.len() > MAX_FIELD_BYTES { return Err(error("Note exceeds 1 MiB")); }
+            if notes.len() + text.len() > MAX_FIELD_BYTES {
+                return Err(error("Note exceeds 1 MiB"));
+            }
             notes.push_str(text);
         }
         None if !text.trim().is_empty() => return Err(error("Text outside the map")),
-        Some(Frame::Node(id)) if !text.trim().is_empty() => warn(warnings, "node-body-text".into(), id),
+        Some(Frame::Node(id)) if !text.trim().is_empty() => {
+            warn(warnings, "node-body-text".into(), id)
+        }
         _ => {}
     }
     Ok(())
@@ -237,31 +297,53 @@ fn escaped(text: &str, attribute: bool) -> Result<String, FormatError> {
     }
     let mut value = quick_xml::escape::escape(text).into_owned();
     if attribute {
-        value = value.replace('\n', "&#10;").replace('\r', "&#13;").replace('\t', "&#9;");
+        value = value
+            .replace('\n', "&#10;")
+            .replace('\r', "&#13;")
+            .replace('\t', "&#9;");
     }
     Ok(value)
 }
 
 pub fn export_mm(doc: &Document) -> Result<ExportReport, FormatError> {
     doc.validate().map_err(error)?;
-    let mut output = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<map version=\"freeplane 1.9.8\">\n");
+    let mut output = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<map version=\"freeplane 1.9.8\">\n",
+    );
     let mut pending = vec![(doc.root.as_str(), false)];
     while let Some((id, close)) = pending.pop() {
         if close {
             output.push_str("</node>\n");
         } else {
             let node = &doc.nodes[id];
-            output.push_str(&format!("<node ID=\"{}\" TEXT=\"{}\" FOLDED=\"{}\" POSITION=\"{}\" LINK=\"{}\">\n",
-                escaped(id, true)?, escaped(&node.text, true)?, node.folded,
-                if node.side == Side::Left { "left" } else { "right" }, escaped(&node.link, true)?));
+            output.push_str(&format!(
+                "<node ID=\"{}\" TEXT=\"{}\" FOLDED=\"{}\" POSITION=\"{}\" LINK=\"{}\">\n",
+                escaped(id, true)?,
+                escaped(&node.text, true)?,
+                node.folded,
+                if node.side == Side::Left {
+                    "left"
+                } else {
+                    "right"
+                },
+                escaped(&node.link, true)?
+            ));
             if !node.notes.is_empty() {
-                output.push_str(&format!("<richcontent TYPE=\"NOTE\" CONTENT-TYPE=\"plain/auto\">{}</richcontent>\n", escaped(&node.notes, false)?));
+                output.push_str(&format!(
+                    "<richcontent TYPE=\"NOTE\" CONTENT-TYPE=\"plain/auto\">{}</richcontent>\n",
+                    escaped(&node.notes, false)?
+                ));
             }
             pending.push((id, true));
             pending.extend(node.children.iter().rev().map(|id| (id.as_str(), false)));
         }
-        if output.len() > MAX_FILE_BYTES { return Err(error("Export exceeds 32 MiB")); }
+        if output.len() > MAX_FILE_BYTES {
+            return Err(error("Export exceeds 32 MiB"));
+        }
     }
     output.push_str("</map>\n");
-    Ok(ExportReport { bytes: output.into_bytes(), warnings: Vec::new() })
+    Ok(ExportReport {
+        bytes: output.into_bytes(),
+        warnings: Vec::new(),
+    })
 }

@@ -29,7 +29,9 @@ fn cancelled_import_is_transactional() {
     editor.commit_edit().unwrap();
     let before = editor.document.clone();
     let selected = editor.selected.clone();
-    editor.stage_import(import_mm(br#"<map><node ID="r" TEXT="Imported"><font SIZE="24"/></node></map>"#).unwrap());
+    editor.stage_import(
+        import_mm(br#"<map><node ID="r" TEXT="Imported"><font SIZE="24"/></node></map>"#).unwrap(),
+    );
     editor.cancel_import();
     assert_eq!(editor.document, before);
     assert_eq!(editor.selected, selected);
@@ -45,7 +47,11 @@ fn failed_save_blocks_close() {
     editor.commit_edit().unwrap();
     assert!(!editor.request(PendingAction::Quit).unwrap());
     let temp = tempfile::tempdir().unwrap();
-    assert!(editor.save_to(&temp.path().join("missing/map.branchline")).is_err());
+    assert!(
+        editor
+            .save_to(&temp.path().join("missing/map.branchline"))
+            .is_err()
+    );
     assert!(editor.is_dirty());
     assert!(matches!(editor.pending, Some(PendingAction::Quit)));
     editor.cancel_pending();
@@ -72,4 +78,18 @@ fn replacing_document_clears_old_history_and_save_path() {
     assert_eq!(editor.document.nodes.len(), 1);
     assert!(editor.path.is_none());
     assert!(editor.is_dirty());
+}
+
+#[test]
+fn no_op_metadata_does_not_invalidate_layout() {
+    let mut editor = Editor::new();
+    let revision = editor.revision;
+    editor
+        .execute(branchline::document::Command::SetNotes {
+            id: editor.selected.clone(),
+            notes: String::new(),
+        })
+        .unwrap();
+    assert_eq!(editor.revision, revision);
+    assert!(!editor.is_dirty());
 }

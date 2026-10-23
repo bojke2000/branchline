@@ -1,4 +1,7 @@
-use branchline::{document::{Command, Document, History}, storage::*};
+use branchline::{
+    document::{Command, Document, History},
+    storage::*,
+};
 use std::fs;
 use uuid::Uuid;
 
@@ -24,11 +27,19 @@ fn recovery_lock_and_identity() {
     let temp = tempfile::tempdir().unwrap();
     let store = RecoveryStore::open(temp.path().into()).unwrap();
     assert!(RecoveryStore::open(temp.path().into()).is_err());
-    let record = RecoveryRecord { version: 1, document_id: Uuid::new_v4().to_string(), original_path: None, document: Document::new("Recovered") };
+    let record = RecoveryRecord {
+        version: 1,
+        document_id: Uuid::new_v4().to_string(),
+        original_path: None,
+        document: Document::new("Recovered"),
+    };
     store.write(&record).unwrap();
     assert_eq!(store.load().unwrap().unwrap(), record);
     assert!(store.discard("wrong").is_err());
-    let other = RecoveryRecord { document_id: Uuid::new_v4().to_string(), ..record.clone() };
+    let other = RecoveryRecord {
+        document_id: Uuid::new_v4().to_string(),
+        ..record.clone()
+    };
     assert!(store.write(&other).is_err());
     store.discard(&record.document_id).unwrap();
     assert!(store.load().unwrap().is_none());
@@ -44,7 +55,15 @@ fn checkpoint_tracks_undo() {
     checkpoint.mark_saved(&doc);
     let mut history = History::default();
     let root = doc.root.clone();
-    history.execute(&mut doc, Command::SetText { id: root, text: "changed".into() }).unwrap();
+    history
+        .execute(
+            &mut doc,
+            Command::SetText {
+                id: root,
+                text: "changed".into(),
+            },
+        )
+        .unwrap();
     assert!(checkpoint.is_dirty(&doc));
     let temp = tempfile::tempdir().unwrap();
     assert!(atomic_write(&temp.path().join("missing/file"), b"x").is_err());

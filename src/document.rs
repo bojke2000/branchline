@@ -110,7 +110,11 @@ impl Document {
             if node.children.len() > MAX_NODES {
                 return fail("Too many children");
             }
-            pending.extend(node.children.iter().map(|child| (child.as_str(), depth + 1)));
+            pending.extend(
+                node.children
+                    .iter()
+                    .map(|child| (child.as_str(), depth + 1)),
+            );
         }
         if seen.len() != self.nodes.len() {
             return fail("Document contains disconnected nodes");
@@ -121,7 +125,10 @@ impl Document {
     pub fn reveal(&mut self, id: &str) {
         let mut current = id.to_owned();
         while let Some(parent) = self.parent(&current).map(str::to_owned) {
-            self.nodes.get_mut(&parent).expect("validated parent").folded = false;
+            self.nodes
+                .get_mut(&parent)
+                .expect("validated parent")
+                .folded = false;
             current = parent;
         }
     }
@@ -141,9 +148,16 @@ impl Document {
     fn apply(&mut self, command: Command) -> Result<Option<NodeId>, DocumentError> {
         match command {
             Command::AddChild { parent, text } => {
-                let parent_node = self.nodes.get(&parent).ok_or_else(|| DocumentError("Unknown parent".into()))?;
+                let parent_node = self
+                    .nodes
+                    .get(&parent)
+                    .ok_or_else(|| DocumentError("Unknown parent".into()))?;
                 let side = if parent == self.root {
-                    if parent_node.children.len() % 2 == 1 { Side::Left } else { Side::Right }
+                    if parent_node.children.len() % 2 == 1 {
+                        Side::Left
+                    } else {
+                        Side::Right
+                    }
                 } else {
                     parent_node.side
                 };
@@ -160,7 +174,10 @@ impl Document {
                 let node = Node::new(&text, side);
                 let id = node.id.clone();
                 let children = &mut self.node_mut(&parent)?.children;
-                let index = children.iter().position(|child| child == &sibling).expect("parent membership");
+                let index = children
+                    .iter()
+                    .position(|child| child == &sibling)
+                    .expect("parent membership");
                 children.insert(index + 1, id.clone());
                 self.nodes.insert(id.clone(), node);
                 Ok(Some(id))
@@ -182,12 +199,24 @@ impl Document {
                 node.folded = !node.folded;
                 Ok(Some(id))
             }
+            Command::Reveal { id } => {
+                if !self.nodes.contains_key(&id) {
+                    return Err(DocumentError("Unknown node".into()));
+                }
+                self.reveal(&id);
+                Ok(Some(id))
+            }
             Command::Delete { id } => {
                 let parent = self.parent_owned(&id)?;
-                self.node_mut(&parent)?.children.retain(|child| child != &id);
+                self.node_mut(&parent)?
+                    .children
+                    .retain(|child| child != &id);
                 let mut pending = vec![id];
                 while let Some(id) = pending.pop() {
-                    let node = self.nodes.remove(&id).ok_or_else(|| DocumentError("Unknown node".into()))?;
+                    let node = self
+                        .nodes
+                        .remove(&id)
+                        .ok_or_else(|| DocumentError("Unknown node".into()))?;
                     pending.extend(node.children);
                 }
                 Ok(Some(parent))
@@ -195,8 +224,13 @@ impl Document {
             Command::MoveSibling { id, delta } => {
                 let parent = self.parent_owned(&id)?;
                 let children = &mut self.node_mut(&parent)?.children;
-                let index = children.iter().position(|child| child == &id).expect("parent membership");
-                let target = index.checked_add_signed(delta).filter(|index| *index < children.len());
+                let index = children
+                    .iter()
+                    .position(|child| child == &id)
+                    .expect("parent membership");
+                let target = index
+                    .checked_add_signed(delta)
+                    .filter(|index| *index < children.len());
                 if let Some(target) = target {
                     children.swap(index, target);
                 }
@@ -205,7 +239,10 @@ impl Document {
             Command::Indent { id } => {
                 let parent = self.parent_owned(&id)?;
                 let children = &self.nodes[&parent].children;
-                let index = children.iter().position(|child| child == &id).expect("parent membership");
+                let index = children
+                    .iter()
+                    .position(|child| child == &id)
+                    .expect("parent membership");
                 if index == 0 {
                     return Err(DocumentError("No preceding sibling to indent under".into()));
                 }
@@ -219,9 +256,14 @@ impl Document {
             Command::Outdent { id } => {
                 let parent = self.parent_owned(&id)?;
                 let grandparent = self.parent_owned(&parent)?;
-                self.node_mut(&parent)?.children.retain(|child| child != &id);
+                self.node_mut(&parent)?
+                    .children
+                    .retain(|child| child != &id);
                 let children = &mut self.node_mut(&grandparent)?.children;
-                let index = children.iter().position(|child| child == &parent).expect("parent membership");
+                let index = children
+                    .iter()
+                    .position(|child| child == &parent)
+                    .expect("parent membership");
                 children.insert(index + 1, id.clone());
                 self.set_subtree_side(&id, self.nodes[&parent].side)?;
                 Ok(Some(id))
@@ -249,6 +291,7 @@ pub enum Command {
     SetLink { id: NodeId, link: String },
     Delete { id: NodeId },
     ToggleFold { id: NodeId },
+    Reveal { id: NodeId },
     MoveSibling { id: NodeId, delta: isize },
     Indent { id: NodeId },
     Outdent { id: NodeId },
@@ -259,10 +302,15 @@ pub struct History {
     undo: VecDeque<(Document, usize)>,
     redo: VecDeque<(Document, usize)>,
     pub evicted: bool,
+    pub generation: u64,
 }
 
 impl History {
-    pub fn execute(&mut self, doc: &mut Document, command: Command) -> Result<Option<NodeId>, DocumentError> {
+    pub fn execute(
+        &mut self,
+        doc: &mut Document,
+        command: Command,
+    ) -> Result<Option<NodeId>, DocumentError> {
         doc.validate()?;
         let mut candidate = doc.clone();
         let selected = candidate.apply(command)?;
@@ -271,17 +319,32 @@ impl History {
             self.redo.clear();
             Self::push(&mut self.undo, doc.clone(), &mut self.evicted);
             *doc = candidate;
+            self.generation = self.generation.wrapping_add(1);
         }
         Ok(selected)
     }
 
     fn push(stack: &mut VecDeque<(Document, usize)>, doc: Document, evicted: &mut bool) {
-        let bytes = doc.nodes.values().map(|node| {
-            std::mem::size_of::<Node>() + node.id.len() + node.text.len() + node.notes.len()
-                + node.link.len() + node.children.iter().map(|id| id.len() + std::mem::size_of::<String>()).sum::<usize>()
-                + 128
-        }).sum::<usize>();
-        while stack.iter().map(|(_, bytes)| bytes).sum::<usize>() + bytes > HISTORY_BYTES && !stack.is_empty() {
+        let bytes = doc
+            .nodes
+            .values()
+            .map(|node| {
+                std::mem::size_of::<Node>()
+                    + node.id.len()
+                    + node.text.len()
+                    + node.notes.len()
+                    + node.link.len()
+                    + node
+                        .children
+                        .iter()
+                        .map(|id| id.len() + std::mem::size_of::<String>())
+                        .sum::<usize>()
+                    + 128
+            })
+            .sum::<usize>();
+        while stack.iter().map(|(_, bytes)| bytes).sum::<usize>() + bytes > HISTORY_BYTES
+            && !stack.is_empty()
+        {
             stack.pop_front();
             *evicted = true;
         }
@@ -294,7 +357,11 @@ impl History {
 
     pub fn undo(&mut self, doc: &mut Document) -> bool {
         if let Some((previous, _)) = self.undo.pop_back() {
-            Self::push(&mut self.redo, std::mem::replace(doc, previous), &mut self.evicted);
+            Self::push(
+                &mut self.redo,
+                std::mem::replace(doc, previous),
+                &mut self.evicted,
+            );
             true
         } else {
             false
@@ -303,7 +370,11 @@ impl History {
 
     pub fn redo(&mut self, doc: &mut Document) -> bool {
         if let Some((next, _)) = self.redo.pop_back() {
-            Self::push(&mut self.undo, std::mem::replace(doc, next), &mut self.evicted);
+            Self::push(
+                &mut self.undo,
+                std::mem::replace(doc, next),
+                &mut self.evicted,
+            );
             true
         } else {
             false
