@@ -183,16 +183,8 @@ impl NativeApp {
     fn action(&mut self, action: EditorAction) {
         let result = (|| {
             if matches!(action, EditorAction::Delete) {
-                let ids = self
-                    .workspace
-                    .map()
-                    .editor
-                    .selection()
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let plan = self.workspace.map().editor.document.plan_deletion(&ids)?;
-                if ids.len() > 1 || plan.node_count > 1 {
+                let plan = self.workspace.map().editor.deletion_plan()?;
+                if self.workspace.map().editor.selection_count() > 1 || plan.node_count > 1 {
                     self.dialog = Some(Dialog::Delete(plan));
                     return Ok(());
                 }
@@ -210,6 +202,10 @@ impl NativeApp {
             return;
         }
         match command {
+            AppCommand::SelectAll => {
+                let result = self.edit(EditorEdit::SelectAll);
+                self.report(result);
+            }
             AppCommand::New => {
                 let result = self
                     .workspace
@@ -266,6 +262,12 @@ impl NativeApp {
     }
 
     fn command_enabled(&self, command: AppCommand, target: &NodeId) -> bool {
+        if command == AppCommand::Delete
+            && self.workspace.map().editor.selection_coverage()
+                == crate::app::SelectionCoverage::WholeMap
+        {
+            return self.workspace.map().editor.document.nodes.len() > 1;
+        }
         if command == AppCommand::Delete
             && self.workspace.map().editor.is_selected(target)
             && self
@@ -326,11 +328,11 @@ impl NativeApp {
     ) -> Option<AppCommand> {
         ui.set_min_width(245.0);
         if self.workspace.map().editor.is_selected(target)
-            && self.workspace.map().editor.selection().len() > 1
+            && self.workspace.map().editor.selection_count() > 1
         {
             ui.weak(format!(
                 "{} selected ideas",
-                self.workspace.map().editor.selection().len()
+                self.workspace.map().editor.selection_count()
             ));
         } else {
             ui.weak(if on_node {
@@ -370,7 +372,7 @@ impl NativeApp {
                 .or(chosen);
         });
         chosen = self
-            .menu_commands(ui, &[AppCommand::Delete], target)
+            .menu_commands(ui, &[AppCommand::SelectAll, AppCommand::Delete], target)
             .or(chosen);
         ui.separator();
         chosen = self
@@ -628,9 +630,16 @@ impl NativeApp {
                     }
                 ));
                 ui.separator();
+                let editor = &self.workspace.map().editor;
+                let hidden = editor.hidden_selection_count();
                 ui.weak(format!(
-                    "{} selected  /  Shift-click: multi-select  /  Right-click: commands",
-                    self.workspace.map().editor.selection().len()
+                    "{} selected{}  /  Shift-click: multi-select  /  Right-click: commands",
+                    editor.selection_count(),
+                    if hidden > 0 {
+                        format!(" ({hidden} hidden)")
+                    } else {
+                        String::new()
+                    }
                 ));
             });
             if let Some(error) = self.error.clone() {

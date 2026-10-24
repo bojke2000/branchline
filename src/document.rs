@@ -142,16 +142,19 @@ impl Document {
     }
 
     pub fn visible_nodes(&self) -> BTreeSet<&NodeId> {
-        let mut visible = BTreeSet::new();
+        self.visible_ids().collect()
+    }
+
+    pub(crate) fn visible_ids(&self) -> impl Iterator<Item = &NodeId> {
         let mut pending = vec![&self.root];
-        while let Some(id) = pending.pop() {
-            visible.insert(id);
+        std::iter::from_fn(move || {
+            let id = pending.pop()?;
             let node = &self.nodes[id];
             if !node.folded {
                 pending.extend(&node.children);
             }
-        }
-        visible
+            Some(id)
+        })
     }
 
     pub fn validate(&self) -> Result<(), DocumentError> {
@@ -407,6 +410,50 @@ impl Document {
             root_retained,
             removed,
         })
+    }
+
+    pub fn copy_outline(
+        &self,
+        selected: &BTreeSet<NodeId>,
+    ) -> Result<OutlineForest, DocumentError> {
+        self.validate()?;
+        if selected.iter().any(|id| !self.nodes.contains_key(id)) {
+            return Err(DocumentError(
+                "Copy selection contains an unknown idea.".into(),
+            ));
+        }
+        let mut roots = vec![];
+        let mut pending = vec![self.root.as_str()];
+        while let Some(id) = pending.pop() {
+            let source = &self.nodes[id];
+            if selected.contains(id) {
+                let mut frames = vec![(source, 0, Vec::new())];
+                loop {
+                    let (node, next, _) = frames.last_mut().expect("open copied node");
+                    if let Some(child) = node.children.get(*next) {
+                        *next += 1;
+                        frames.push((&self.nodes[child], 0, vec![]));
+                    } else {
+                        let (node, _, children) = frames.pop().expect("completed copied node");
+                        let copied = OutlineNode {
+                            label: node.text.clone(),
+                            children,
+                        };
+                        if let Some((_, _, children)) = frames.last_mut() {
+                            children.push(copied);
+                        } else {
+                            roots.push(copied);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                pending.extend(source.children.iter().rev().map(String::as_str));
+            }
+        }
+        let forest = OutlineForest { roots };
+        forest.validate()?;
+        Ok(forest)
     }
 
     fn delete_many(&mut self, ids: Vec<NodeId>) -> Result<Option<NodeId>, DocumentError> {

@@ -3,6 +3,7 @@ use eframe::egui::{Key, Modifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppCommand {
+    SelectAll,
     New,
     NextTab,
     PreviousTab,
@@ -41,6 +42,7 @@ pub enum AppCommand {
 }
 
 pub const EDIT_COMMANDS: &[AppCommand] = &[
+    AppCommand::SelectAll,
     AppCommand::AddChild,
     AppCommand::AddSibling,
     AppCommand::Edit,
@@ -86,6 +88,7 @@ pub const VIEW_COMMANDS: &[AppCommand] = &[
 
 #[derive(Clone, Copy)]
 enum Binding {
+    ControlOrCommand(Key),
     Plain(Key),
     Alt(Key),
     AltOrShift(Key),
@@ -98,6 +101,12 @@ enum Binding {
 impl Binding {
     fn matches(self, key: Key, modifiers: Modifiers) -> bool {
         match self {
+            Self::ControlOrCommand(bound) => {
+                key == bound
+                    && (modifiers.ctrl || modifiers.command || modifiers.mac_cmd)
+                    && !modifiers.shift
+                    && !modifiers.alt
+            }
             Self::ControlTab(backwards) => {
                 key == Key::Tab
                     && modifiers.ctrl
@@ -145,6 +154,11 @@ impl AppCommand {
         use AppCommand::*;
         use Binding::{AltOrShift, Command, CommandShift, Plain};
         let (label, shortcut, binding) = match self {
+            SelectAll => (
+                "Select all ideas",
+                "Cmd/Ctrl+A",
+                Some(Binding::ControlOrCommand(Key::A)),
+            ),
             New => ("New map", "Cmd/Ctrl+N", Some(Command(Key::N))),
             NextTab => ("Next map tab", "Ctrl+Tab", Some(Binding::ControlTab(false))),
             PreviousTab => (

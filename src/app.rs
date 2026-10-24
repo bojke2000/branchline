@@ -75,7 +75,14 @@ pub enum DraftField {
     Link(NodeId),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionCoverage {
+    VisibleNodes,
+    WholeMap,
+}
+
 pub enum EditorEdit {
+    SelectAll,
     PasteOutline {
         parent: Option<NodeId>,
         forest: crate::outline::OutlineForest,
@@ -133,6 +140,8 @@ pub struct Editor {
     pub document: Document,
     pub selected: NodeId,
     selection: BTreeSet<NodeId>,
+    coverage: SelectionCoverage,
+    whole_hidden: usize,
     pub history: History,
     pub editing: Option<EditBuffer>,
     pub details: Option<DetailsDraft>,
@@ -160,6 +169,8 @@ impl Editor {
         Self {
             selected: document.root.clone(),
             selection: BTreeSet::from([document.root.clone()]),
+            coverage: SelectionCoverage::VisibleNodes,
+            whole_hidden: 0,
             document_bytes: document.estimated_bytes(),
             text_bytes: document.decoded_text_bytes(),
             document,
@@ -276,6 +287,8 @@ impl Editor {
             document: self.document.clone(),
             selected: self.selected.clone(),
             selection: self.selection.clone(),
+            coverage: self.coverage,
+            whole_hidden: self.whole_hidden,
             history: self.history.clone(),
             editing: self.editing.clone(),
             details: self.details.clone(),
@@ -289,6 +302,7 @@ impl Editor {
             text_bytes: self.text_bytes,
         };
         match edit {
+            EditorEdit::SelectAll => candidate.select_all(),
             EditorEdit::PasteOutline { parent, forest } => {
                 forest.validate()?;
                 let command = match parent {
@@ -483,6 +497,12 @@ impl Editor {
     }
 
     fn reconcile_selection(&mut self) {
+        if self.coverage == SelectionCoverage::WholeMap {
+            self.whole_hidden = self.document.nodes.len() - self.document.visible_ids().count();
+            self.selected = self.document.root.clone();
+            self.selection = BTreeSet::from([self.selected.clone()]);
+            return;
+        }
         self.selected = self
             .document
             .visible_ancestor(&self.selected)
@@ -494,7 +514,12 @@ impl Editor {
 
     pub fn execute(&mut self, command: Command) -> Result<(), EditorError> {
         let generation = self.history.generation;
-        if let Some(selected) = self.history.execute(&mut self.document, command)?
+        let preserve_coverage = matches!(&command, Command::ToggleFold { .. });
+        let selected = self.history.execute(&mut self.document, command)?;
+        if !preserve_coverage {
+            self.coverage = SelectionCoverage::VisibleNodes;
+        }
+        if let Some(selected) = selected
             && selected != self.selected
         {
             self.replace_selection(selected);
@@ -536,6 +561,7 @@ impl Editor {
     }
 
     fn replace_selection(&mut self, id: NodeId) {
+        self.coverage = SelectionCoverage::VisibleNodes;
         self.selection = BTreeSet::from([id.clone()]);
         self.selected = id;
     }
@@ -545,10 +571,60 @@ impl Editor {
     }
 
     pub fn is_selected(&self, id: &str) -> bool {
-        self.selection.contains(id)
+        if self.coverage == SelectionCoverage::WholeMap {
+            self.document.nodes.contains_key(id)
+        } else {
+            self.selection.contains(id)
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        self.replace_selection(self.document.root.clone());
+        self.coverage = SelectionCoverage::WholeMap;
+        self.reconcile_selection();
+    }
+
+    pub fn selection_coverage(&self) -> SelectionCoverage {
+        self.coverage
+    }
+
+    pub fn selection_count(&self) -> usize {
+        if self.coverage == SelectionCoverage::WholeMap {
+            self.document.nodes.len()
+        } else {
+            self.selection.len()
+        }
+    }
+
+    pub fn hidden_selection_count(&self) -> usize {
+        if self.coverage == SelectionCoverage::WholeMap {
+            self.whole_hidden
+        } else {
+            0
+        }
+    }
+
+    pub fn copy_forest(&self) -> Result<crate::outline::OutlineForest, EditorError> {
+        Ok(self.snapshot_with_drafts()?.copy_outline(&self.selection)?)
+    }
+
+    pub fn deletion_plan(&self) -> Result<crate::document::DeletionPlan, EditorError> {
+        let mut ids: Vec<_> = self.selection.iter().cloned().collect();
+        if self.coverage == SelectionCoverage::WholeMap {
+            ids.extend(
+                self.document.nodes[&self.document.root]
+                    .children
+                    .iter()
+                    .cloned(),
+            );
+        }
+        Ok(self.document.plan_deletion(&ids)?)
     }
 
     pub fn activate_selection(&mut self, id: &str) -> Result<(), EditorError> {
+        if self.coverage == SelectionCoverage::WholeMap {
+            return self.select(id);
+        }
         if self.selection.contains(id) {
             self.commit_edit()?;
             self.selected = id.into();
@@ -564,6 +640,7 @@ impl Editor {
             .document
             .visible_ancestor(id)
             .ok_or_else(|| EditorError::State("Unknown selection".into()))?;
+        self.coverage = SelectionCoverage::VisibleNodes;
         if self.selection.contains(&id) {
             if self.selection.len() > 1 {
                 self.selection.remove(&id);
@@ -609,7 +686,7 @@ impl Editor {
                 None
             }
             EditorAction::Delete => Some(Command::DeleteMany {
-                ids: self.selection.iter().cloned().collect(),
+                ids: self.deletion_plan()?.roots,
             }),
             EditorAction::Fold => Some(Command::ToggleFold { id }),
             EditorAction::MoveUp => Some(Command::MoveSibling { id, delta: -1 }),
@@ -617,18 +694,21 @@ impl Editor {
             EditorAction::Indent => Some(Command::Indent { id }),
             EditorAction::Outdent => Some(Command::Outdent { id }),
             EditorAction::Undo => {
+                self.coverage = SelectionCoverage::VisibleNodes;
                 if self.history.undo(&mut self.document) {
                     self.changed();
                 }
                 None
             }
             EditorAction::Redo => {
+                self.coverage = SelectionCoverage::VisibleNodes;
                 if self.history.redo(&mut self.document) {
                     self.changed();
                 }
                 None
             }
             EditorAction::Navigate(direction) => {
+                self.coverage = SelectionCoverage::VisibleNodes;
                 self.navigate(direction);
                 None
             }
@@ -654,6 +734,7 @@ impl Editor {
     }
 
     fn start_edit(&mut self, text: String) {
+        self.coverage = SelectionCoverage::VisibleNodes;
         self.draft_revision = self.draft_revision.wrapping_add(1);
         self.editing = Some(EditBuffer {
             id: self.selected.clone(),
