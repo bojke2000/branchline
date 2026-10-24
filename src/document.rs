@@ -1,3 +1,4 @@
+use crate::outline::{OutlineForest, OutlineNode};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -34,7 +35,7 @@ pub struct Node {
 }
 
 impl Node {
-    fn new(text: &str, side: Side) -> Self {
+    fn new(text: impl Into<String>, side: Side) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             text: text.into(),
@@ -433,6 +434,11 @@ impl Document {
 
     fn apply(&mut self, command: Command) -> Result<Option<NodeId>, DocumentError> {
         match command {
+            Command::PasteOutline { parent, forest } => self.paste_outline(parent, forest),
+            Command::ReplaceWithOutline { forest } => {
+                *self = Self::from_outline(forest)?;
+                Ok(Some(self.root.clone()))
+            }
             Command::AddChild { parent, text } => {
                 let parent_node = self
                     .nodes
@@ -447,7 +453,7 @@ impl Document {
                 } else {
                     parent_node.side
                 };
-                let node = Node::new(&text, side);
+                let node = Node::new(text, side);
                 let id = node.id.clone();
                 self.node_mut(&parent)?.children.push(id.clone());
                 self.node_mut(&parent)?.folded = false;
@@ -457,7 +463,7 @@ impl Document {
             Command::AddSibling { sibling, text } => {
                 let parent = self.parent_owned(&sibling)?;
                 let side = self.nodes[&sibling].side;
-                let node = Node::new(&text, side);
+                let node = Node::new(text, side);
                 let id = node.id.clone();
                 let children = &mut self.node_mut(&parent)?.children;
                 let index = children
@@ -552,10 +558,135 @@ impl Document {
         }
         Ok(())
     }
+
+    fn insert_outline_children(&mut self, parent: &str, roots: Vec<OutlineNode>) -> NodeId {
+        let owner = &self.nodes[parent];
+        let count = owner.children.len();
+        let inherited = owner.side;
+        let mut pending: Vec<_> = roots
+            .into_iter()
+            .enumerate()
+            .rev()
+            .map(|(index, node)| {
+                let side = if parent == self.root {
+                    if (count + index).is_multiple_of(2) {
+                        Side::Right
+                    } else {
+                        Side::Left
+                    }
+                } else {
+                    inherited
+                };
+                (parent.to_owned(), node, side)
+            })
+            .collect();
+        let mut first = None;
+        while let Some((parent, source, side)) = pending.pop() {
+            let node = Node::new(source.label, side);
+            let id = node.id.clone();
+            first.get_or_insert_with(|| id.clone());
+            self.nodes
+                .get_mut(&parent)
+                .expect("validated outline parent")
+                .children
+                .push(id.clone());
+            self.nodes.insert(id.clone(), node);
+            pending.extend(
+                source
+                    .children
+                    .into_iter()
+                    .rev()
+                    .map(|child| (id.clone(), child, side)),
+            );
+        }
+        first.expect("validated outline is nonempty")
+    }
+
+    fn from_outline(mut forest: OutlineForest) -> Result<Self, DocumentError> {
+        let facts = forest.facts()?;
+        let synthetic = usize::from(forest.roots.len() != 1);
+        if facts.nodes + synthetic > MAX_NODES
+            || facts.depth + synthetic > MAX_DEPTH
+            || facts.text_bytes + synthetic * "Pasted ideas".len() > MAX_TEXT_BYTES
+        {
+            return Err(DocumentError(
+                "Outline plus its synthetic root exceeds document capacity.".into(),
+            ));
+        }
+        let source = if synthetic == 0 {
+            forest.roots.pop().expect("validated single root")
+        } else {
+            OutlineNode {
+                label: "Pasted ideas".into(),
+                children: forest.roots,
+            }
+        };
+        let root = Node::new(source.label, Side::Right);
+        let mut document = Self {
+            version: 1,
+            root: root.id.clone(),
+            nodes: BTreeMap::from([(root.id.clone(), root)]),
+        };
+        if !source.children.is_empty() {
+            document.insert_outline_children(&document.root.clone(), source.children);
+        }
+        Ok(document)
+    }
+
+    fn paste_outline(
+        &mut self,
+        parent: NodeId,
+        forest: OutlineForest,
+    ) -> Result<Option<NodeId>, DocumentError> {
+        let facts = forest.facts()?;
+        if !self.nodes.contains_key(&parent) {
+            return Err(DocumentError(
+                "The paste destination no longer exists.".into(),
+            ));
+        }
+        if self.nodes.len() + facts.nodes > MAX_NODES
+            || self.decoded_text_bytes().saturating_add(facts.text_bytes) > MAX_TEXT_BYTES
+        {
+            return Err(DocumentError(
+                "Pasted outline exceeds the destination's document capacity.".into(),
+            ));
+        }
+        let mut pending = vec![(self.root.as_str(), 1)];
+        let depth = loop {
+            let (id, depth) = pending.pop().expect("validated destination is reachable");
+            if id == parent {
+                break depth;
+            }
+            pending.extend(
+                self.nodes[id]
+                    .children
+                    .iter()
+                    .map(|child| (child.as_str(), depth + 1)),
+            );
+        };
+        if depth + facts.depth > MAX_DEPTH {
+            return Err(DocumentError(
+                "Pasted outline would exceed document depth 256.".into(),
+            ));
+        }
+        let first = self.insert_outline_children(&parent, forest.roots);
+        self.nodes
+            .get_mut(&parent)
+            .expect("validated paste destination")
+            .folded = false;
+        Ok(Some(first))
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum Command {
+    PasteOutline {
+        parent: NodeId,
+        forest: OutlineForest,
+    },
+    ReplaceWithOutline {
+        forest: OutlineForest,
+    },
     AddChild {
         parent: NodeId,
         text: String,

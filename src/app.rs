@@ -76,6 +76,10 @@ pub enum DraftField {
 }
 
 pub enum EditorEdit {
+    PasteOutline {
+        parent: Option<NodeId>,
+        forest: crate::outline::OutlineForest,
+    },
     Action(EditorAction),
     Key(EditorKey),
     Command(Command),
@@ -86,7 +90,10 @@ pub enum EditorEdit {
     BeginDetails(NodeId),
     FlushDetails,
     CommitDrafts,
-    SetDraft { field: DraftField, text: String },
+    SetDraft {
+        field: DraftField,
+        text: String,
+    },
 }
 
 enum PreparedKind {
@@ -282,6 +289,29 @@ impl Editor {
             text_bytes: self.text_bytes,
         };
         match edit {
+            EditorEdit::PasteOutline { parent, forest } => {
+                forest.validate()?;
+                let command = match parent {
+                    Some(parent) => Command::PasteOutline {
+                        parent: parent.clone(),
+                        forest: forest.clone(),
+                    },
+                    None => {
+                        if candidate.has_drafts()? {
+                            return Err(EditorError::State("The blank map has unfinished changes; paste beneath its root instead.".into()));
+                        }
+                        let had_inline = candidate.editing.take().is_some();
+                        let had_details = candidate.details.take().is_some();
+                        if had_inline || had_details {
+                            candidate.draft_revision = candidate.draft_revision.wrapping_add(1);
+                        }
+                        Command::ReplaceWithOutline {
+                            forest: forest.clone(),
+                        }
+                    }
+                };
+                candidate.execute(command)?;
+            }
             EditorEdit::Action(action) => {
                 candidate.flush_details()?;
                 candidate.dispatch(*action)?;

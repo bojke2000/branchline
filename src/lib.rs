@@ -6,6 +6,7 @@ mod drag;
 pub mod file_identity;
 pub mod interchange;
 pub mod layout;
+pub mod outline;
 pub mod recovery;
 pub mod session;
 pub mod storage;

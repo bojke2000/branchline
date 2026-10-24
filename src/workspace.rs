@@ -16,6 +16,15 @@ pub use lifecycle::{CloseDecision, TransitionProgress};
 #[error("{0}")]
 pub struct WorkspaceError(pub String);
 
+pub enum PasteTarget {
+    Append {
+        session: SessionId,
+        node: crate::document::NodeId,
+        revision: u64,
+    },
+    NewMap,
+}
+
 pub struct Workspace {
     order: Vec<SessionId>,
     entries: BTreeMap<SessionId, SessionState>,
@@ -385,6 +394,47 @@ impl Workspace {
         self.insert_session(map)
     }
 
+    pub fn paste_outline(
+        &mut self,
+        target: PasteTarget,
+        forest: crate::outline::OutlineForest,
+    ) -> Result<SessionId, WorkspaceError> {
+        self.require_idle()?;
+        forest
+            .validate()
+            .map_err(|error| WorkspaceError(error.to_string()))?;
+        match target {
+            PasteTarget::Append {
+                session,
+                node,
+                revision,
+            } => {
+                let map = self.session(session)?;
+                if map.editor.revision != revision || !map.editor.document.nodes.contains_key(&node)
+                {
+                    return Err(WorkspaceError(
+                        "The paste destination changed; no outline was inserted.".into(),
+                    ));
+                }
+                let parent = (!map.is_pristine_blank()).then_some(node);
+                self.apply(session, EditorEdit::PasteOutline { parent, forest })?;
+                Ok(session)
+            }
+            PasteTarget::NewMap => {
+                let mut map = MapSession::new_blank(SessionId::new());
+                let edit = map
+                    .editor
+                    .prepare(&EditorEdit::PasteOutline {
+                        parent: None,
+                        forest,
+                    })
+                    .map_err(|error| WorkspaceError(error.to_string()))?;
+                map.editor.commit_prepared(edit, 0);
+                self.insert_session(map)
+            }
+        }
+    }
+
     pub fn retry_restore(
         &mut self,
         restored: crate::recovery::RestoredSession,
@@ -553,8 +603,19 @@ impl Workspace {
                 "Workspace storage capacity exceeded; no tab was added.".into(),
             ));
         }
+        let next_stamp = self
+            .next_stamp
+            .checked_add(map.editor.history.next_serial())
+            .ok_or_else(|| {
+                WorkspaceError(
+                    "History retention stamp capacity exceeded; no tab was added.".into(),
+                )
+            })?;
+        map.editor.history.stamp_since(0, self.next_stamp);
         self.entries.insert(id, SessionState::Map(Box::new(map)));
         self.order.push(id);
+        self.next_stamp = next_stamp;
+        self.enforce_history_budget();
         self.request_activate(id)?;
         Ok(id)
     }
@@ -595,6 +656,88 @@ mod tests {
         app::{EditorAction, EditorEdit},
         document::Command,
     };
+
+    #[test]
+    fn pasted_new_maps_share_history_stamps_and_the_global_budget() {
+        use crate::outline::{OutlineForest, OutlineNode};
+        let mut workspace = Workspace::new();
+        let first = workspace.active_id();
+        let root = workspace.map().editor.selected.clone();
+        let retained = workspace.map().editor.document.estimated_bytes();
+        workspace
+            .apply(
+                first,
+                EditorEdit::Command(Command::SetText {
+                    id: root,
+                    text: "Older".into(),
+                }),
+            )
+            .unwrap();
+        workspace.history_limit = retained;
+        let pasted = workspace
+            .paste_outline(
+                PasteTarget::NewMap,
+                OutlineForest {
+                    roots: vec![OutlineNode {
+                        label: "New map".into(),
+                        children: vec![],
+                    }],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            workspace
+                .session(first)
+                .unwrap()
+                .editor
+                .history
+                .retained_bytes(),
+            0
+        );
+        assert_eq!(
+            workspace
+                .session(pasted)
+                .unwrap()
+                .editor
+                .history
+                .oldest_retained()
+                .unwrap()
+                .0,
+            1
+        );
+        assert_eq!(workspace.next_stamp, 2);
+        workspace.storage_limit = workspace.estimated_bytes();
+        let prior = workspace
+            .session(pasted)
+            .unwrap()
+            .editor
+            .history
+            .retained_bytes();
+        assert!(
+            workspace
+                .paste_outline(
+                    PasteTarget::NewMap,
+                    OutlineForest {
+                        roots: vec![OutlineNode {
+                            label: "Rejected".into(),
+                            children: vec![]
+                        }],
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(workspace.len(), 2);
+        assert_eq!(workspace.next_stamp, 2);
+        assert_eq!(
+            workspace
+                .session(pasted)
+                .unwrap()
+                .editor
+                .history
+                .retained_bytes(),
+            prior
+        );
+    }
 
     #[test]
     fn blocked_undo_retains_its_entry() {
