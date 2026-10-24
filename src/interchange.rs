@@ -39,9 +39,7 @@ pub fn read_native(bytes: &[u8]) -> Result<Document, FormatError> {
 
 pub fn write_native(doc: &Document) -> Result<Vec<u8>, FormatError> {
     doc.validate().map_err(error)?;
-    let bytes = serde_json::to_vec(doc).map_err(error)?;
-    check_size(&bytes)?;
-    Ok(bytes)
+    crate::storage::serialize_bounded(doc).map_err(error)
 }
 
 fn check_size(bytes: &[u8]) -> Result<(), FormatError> {

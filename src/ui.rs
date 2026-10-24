@@ -8,8 +8,9 @@ use crate::{
     file_identity::read_identified,
     interchange::{ImportReport, export_mm, import_mm},
     layout::{self, Layout, Point, Rect, Size},
+    recovery::RecoveryCoordinator,
     session::{SessionId, Viewport},
-    storage::{RecoveryRecord, RecoveryStore, StorageError, atomic_write, read_bounded},
+    storage::{StorageError, atomic_write, read_bounded},
     workspace::Workspace,
 };
 use eframe::egui::{self, Color32, FontId, Id, Key, Pos2, Sense, Stroke, Vec2};
@@ -39,12 +40,13 @@ enum Dialog {
 }
 
 mod details;
+mod recovery;
 mod tabs;
 
 pub struct NativeApp {
     pub workspace: Workspace,
-    store: RecoveryStore,
-    recovery: Option<RecoveryRecord>,
+    store: RecoveryCoordinator,
+    recovery_pending: bool,
     dialog: Option<Dialog>,
     error: Option<String>,
     status: String,
@@ -65,8 +67,6 @@ pub struct NativeApp {
     composing: Option<Id>,
     drag: Option<CanvasDrag>,
     allow_close: bool,
-    recovery_revision: Option<(u64, u64)>,
-    last_change: Instant,
     input_after_switch: bool,
     owned_widgets: BTreeMap<SessionId, HashSet<Id>>,
     pending_close: Option<SessionId>,
@@ -74,15 +74,24 @@ pub struct NativeApp {
 }
 
 impl NativeApp {
-    pub fn new(store: RecoveryStore) -> Result<Self, StorageError> {
-        let recovery = store.load()?;
-        let dialog = recovery.as_ref().map(|_| Dialog::Recovery);
+    pub fn new(store: impl Into<RecoveryCoordinator>) -> Result<Self, StorageError> {
+        let mut store = store.into();
+        let restore = store.load()?;
+        let recovery_pending = restore.has_recovery();
+        let notices = restore.warnings.join("\n");
+        let dialog = recovery_pending.then_some(Dialog::Recovery);
+        let workspace = if recovery_pending {
+            Workspace::new()
+        } else {
+            Workspace::from_restore(restore, true)
+                .map_err(|cause| StorageError(cause.to_string()))?
+        };
         Ok(Self {
-            workspace: Workspace::new(),
+            workspace,
             store,
-            recovery,
+            recovery_pending,
             dialog,
-            error: None,
+            error: (!notices.is_empty()).then_some(notices),
             status: "Local by design. Your ideas stay on this computer.".into(),
             placed: Layout::default(),
             galleys: BTreeMap::new(),
@@ -101,8 +110,6 @@ impl NativeApp {
             composing: None,
             drag: None,
             allow_close: false,
-            recovery_revision: None,
-            last_change: Instant::now(),
             input_after_switch: false,
             owned_widgets: BTreeMap::new(),
             pending_close: None,
@@ -129,17 +136,36 @@ impl NativeApp {
     }
 
     pub fn checkpoint_recovery(&mut self) -> Result<(), EditorError> {
-        if !self.workspace.map().editor.is_dirty() && !self.workspace.map().editor.has_drafts()? {
-            return self.clear_recovery();
+        let publication = self.store.publish(&self.workspace.recovery_state())?;
+        if let Some(cause) = publication.cleanup_error {
+            self.error = Some(format!(
+                "Workspace recovery was published; snapshot cleanup remains pending: {cause}"
+            ));
         }
-        let document = self.workspace.map().editor.snapshot_with_drafts()?;
-        let record = RecoveryRecord {
-            version: 1,
-            document_id: self.workspace.map().editor.document_id.clone(),
-            original_path: self.workspace.map().editor.path.clone(),
-            document,
-        };
-        self.store.write(&record)?;
+        Ok(())
+    }
+
+    fn resolve_recovery(&mut self, recover: bool) -> Result<(), EditorError> {
+        let restore = self.store.load()?;
+        let workspace = Workspace::from_restore(restore, recover)?;
+        if !recover {
+            let publication = self.store.publish(&workspace.recovery_state())?;
+            if let Some(cause) = publication.cleanup_error {
+                self.error = Some(format!(
+                    "Recovery decisions were published; snapshot cleanup remains pending: {cause}"
+                ));
+            }
+        }
+        self.workspace = workspace;
+        self.recovery_pending = false;
+        self.layout_revision = None;
+        self.layout_session = None;
+        self.galleys.clear();
+        self.branch_colors.clear();
+        self.placed = Layout::default();
+        self.drag = None;
+        self.edit_focus = None;
+        self.input_after_switch = true;
         Ok(())
     }
 
@@ -429,21 +455,6 @@ impl NativeApp {
         }
     }
 
-    fn clear_recovery(&self) -> Result<(), EditorError> {
-        self.store
-            .discard(&self.workspace.map().editor.document_id)
-            .map_err(EditorError::from)
-    }
-
-    fn reset_view(&mut self) {
-        self.workspace.map_mut().viewport = Viewport::default();
-        self.layout_revision = None;
-        self.workspace.map_mut().editor.details = None;
-        self.recovery_revision = None;
-        self.fit_requested = true;
-        self.drag = None;
-    }
-
     fn perform_pending(&mut self, ctx: &egui::Context) {
         let Some(action) = self.workspace.map().editor.pending.clone() else {
             return;
@@ -451,7 +462,7 @@ impl NativeApp {
         let result = (|| -> Result<(), EditorError> {
             match action {
                 PendingAction::Quit => {
-                    self.clear_recovery()?;
+                    self.checkpoint_recovery()?;
                     self.workspace.map_mut().editor.pending = None;
                     self.allow_close = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -533,7 +544,7 @@ impl NativeApp {
             self.workspace
                 .save(session, &path)
                 .map_err(EditorError::from)
-                .and_then(|_| self.clear_recovery())
+                .and_then(|_| self.checkpoint_recovery())
         };
         match result {
             Ok(()) => {
@@ -592,14 +603,16 @@ impl NativeApp {
             root_ui.style_mut().visuals = egui::Visuals::dark();
             self.theme_initialized = true;
         }
+        if self.workspace.active().is_err() {
+            self.failed_restore_view(root_ui);
+            return;
+        }
         if ctx.input(|input| input.viewport().close_requested()) && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.dialog.is_none() {
                 self.request(PendingAction::Quit, &ctx);
             }
         }
-        let before = self.workspace.map().editor.revision;
-        let draft_before = self.workspace.map().editor.draft_revision;
         if self.dialog.is_none() {
             self.shortcuts(&ctx);
         }
@@ -660,6 +673,11 @@ impl NativeApp {
             self.palette(&ctx);
         }
         self.dialogs(&ctx);
+        if self.workspace.active().is_err() {
+            ctx.request_repaint();
+            self.finish_tab_transition(&ctx);
+            return;
+        }
         if self.help_open {
             egui::Window::new("BMM keyboard and mouse guide")
                 .open(&mut self.help_open)
@@ -713,38 +731,7 @@ impl NativeApp {
                     );
                 });
         }
-        if self.workspace.map().editor.revision != before
-            || self.workspace.map().editor.draft_revision != draft_before
-        {
-            self.last_change = Instant::now();
-            self.recovery_revision = None;
-        }
-        if self.dialog.is_none()
-            && self.recovery.is_none()
-            && self.recovery_revision
-                != Some((
-                    self.workspace.map().editor.revision,
-                    self.workspace.map().editor.draft_revision,
-                ))
-        {
-            if self.last_change.elapsed() >= Duration::from_millis(700)
-                && self.recovery_revision
-                    != Some((
-                        self.workspace.map().editor.revision,
-                        self.workspace.map().editor.draft_revision,
-                    ))
-            {
-                match self.checkpoint_recovery() {
-                    Ok(()) => self.status = "Recovery snapshot updated locally.".into(),
-                    Err(error) => self.error = Some(format!("Recovery unavailable: {error}")),
-                }
-                self.recovery_revision = Some((
-                    self.workspace.map().editor.revision,
-                    self.workspace.map().editor.draft_revision,
-                ));
-            }
-            ctx.request_repaint_after(Duration::from_millis(700));
-        }
+        self.debounce_recovery(&ctx);
         if text_pending || self.workspace.map().editor.editing.is_some() {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
@@ -1731,21 +1718,15 @@ impl NativeApp {
                 }
                 Dialog::Recovery => {
                     ui.heading("Your ideas are still here");
-                    ui.label("A local recovery snapshot is available. Restore it or explicitly discard it before starting another document.");
+                    ui.label("Local snapshots contain unsaved maps and unfinished edits. Restore all available work, or discard unsaved work and reopen saved maps from disk.");
                     ui.horizontal(|ui| {
-                        if ui.button("Restore").clicked()
-                            && let Some(record) = self.recovery.clone() {
-                                let result = self.workspace.map_mut().editor.replace_document(record.document, record.original_path, false, Some(record.document_id));
-                                if result.is_ok() { self.recovery = None; keep = false; self.reset_view(); }
+                        for (label, recover) in [("Restore", true), ("Discard unsaved work", false)] {
+                            if ui.button(label).clicked() {
+                                let result = self.resolve_recovery(recover);
+                                if result.is_ok() { keep = false; }
                                 self.report(result);
                             }
-                        if ui.button("Discard snapshot").clicked()
-                            && let Some(record) = &self.recovery {
-                                match self.store.discard(&record.document_id) {
-                                    Ok(()) => { self.recovery = None; keep = false; }
-                                    Err(error) => self.error = Some(error.to_string()),
-                                }
-                            }
+                        }
                     });
                 }
                 Dialog::Import => {

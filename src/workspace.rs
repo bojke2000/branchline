@@ -29,6 +29,143 @@ impl Default for Workspace {
 }
 
 impl Workspace {
+    pub fn from_restore(
+        restore: crate::recovery::WorkspaceRestore,
+        recover: bool,
+    ) -> Result<Self, WorkspaceError> {
+        use crate::recovery::RestoreContent;
+        let mut workspace = Self::new();
+        workspace.order.clear();
+        workspace.entries.clear();
+        let active = restore.active;
+        for restored in restore.sessions {
+            let tab = restored.tab;
+            if !recover && tab.saved_path.is_none() {
+                continue;
+            }
+            let outcome = (|| -> Result<Option<MapSession>, WorkspaceError> {
+                let mut map = MapSession::new_blank(tab.id);
+                let (document, clean, identity) = match restored.content {
+                    RestoreContent::Recovered(document) if recover => {
+                        let identity = match &tab.saved_path {
+                            Some(path) => match FileIdentity::open(path) {
+                                Ok(identity) => FileIdentityState::Known(identity),
+                                Err(error) => FileIdentityState::Unresolved(error.to_string()),
+                            },
+                            None => FileIdentityState::Unsaved,
+                        };
+                        (document, false, identity)
+                    }
+                    RestoreContent::Failed(reason) if recover => {
+                        return Err(WorkspaceError(reason));
+                    }
+                    _ => {
+                        let Some(path) = &tab.saved_path else {
+                            return Ok(None);
+                        };
+                        let opened = crate::file_identity::read_identified(path)
+                            .map_err(|error| WorkspaceError(error.to_string()))?;
+                        let document = read_native(&opened.bytes)
+                            .map_err(|error| WorkspaceError(error.to_string()))?;
+                        (document, true, FileIdentityState::Known(opened.identity))
+                    }
+                };
+                map.editor
+                    .replace_document(
+                        document,
+                        tab.saved_path.clone(),
+                        clean,
+                        Some(tab.document_id.to_string()),
+                    )
+                    .map_err(|error| WorkspaceError(error.to_string()))?;
+                map.file_identity = identity;
+                map.pristine_blank = false;
+                if let Some(selected) = &tab.view.selected
+                    && map.editor.document.nodes.contains_key(selected)
+                {
+                    map.editor
+                        .select(selected)
+                        .map_err(|error| WorkspaceError(error.to_string()))?;
+                }
+                map.viewport.pan = crate::layout::Point {
+                    x: tab.view.pan[0],
+                    y: tab.view.pan[1],
+                };
+                map.viewport.zoom = tab.view.zoom;
+                Ok(Some(map))
+            })();
+            let failure = match outcome {
+                Ok(Some(map)) => match workspace.insert_session(map) {
+                    Ok(_) => continue,
+                    Err(error) => error.to_string(),
+                },
+                Ok(None) => continue,
+                Err(error) => error.to_string(),
+            };
+            let entry = SessionState::RestoreError(crate::session::RestoreFailure {
+                path: tab.saved_path,
+                reason: failure,
+                retain_recovery: recover && tab.snapshot.is_some(),
+            });
+            let estimated = match &entry {
+                SessionState::RestoreError(error) => error
+                    .reason
+                    .len()
+                    .saturating_add(error.path.as_ref().map_or(0, |path| path.as_os_str().len()))
+                    .saturating_add(256),
+                _ => unreachable!(),
+            };
+            if workspace.estimated_bytes().saturating_add(estimated) > workspace.storage_limit {
+                return Err(WorkspaceError("Restored workspace metadata exceeds storage capacity; the recovery store was retained.".into()));
+            }
+            workspace.order.push(tab.id);
+            workspace.entries.insert(tab.id, entry);
+        }
+        if workspace.order.is_empty() {
+            workspace.new_map()?;
+        }
+        workspace.active = active
+            .filter(|id| workspace.entries.contains_key(id))
+            .unwrap_or(workspace.order[0]);
+        workspace.pending_activation = None;
+        Ok(workspace)
+    }
+
+    fn manifest_bound(&self) -> usize {
+        self.entries.values().fold(256usize, |total, entry| {
+            total.saturating_add(match entry {
+                SessionState::Map(map) => crate::recovery::editor_manifest_bound(&map.editor),
+                SessionState::RestoreError(failure) => 2048usize
+                    .saturating_add(failure.reason.len().saturating_mul(6))
+                    .saturating_add(
+                        failure
+                            .path
+                            .as_ref()
+                            .map_or(0, |path| path.as_os_str().len().saturating_mul(6)),
+                    ),
+            })
+        })
+    }
+
+    pub fn recovery_state(&self) -> crate::recovery::WorkspaceRecoveryState<'_> {
+        crate::recovery::WorkspaceRecoveryState {
+            active: Some(self.active),
+            sessions: self
+                .order
+                .iter()
+                .map(|id| match &self.entries[id] {
+                    SessionState::Map(map) => crate::recovery::RecoverySession::Map(map),
+                    SessionState::RestoreError(error) => crate::recovery::RecoverySession::Failed {
+                        id: *id,
+                        path: &error.path,
+                        reason: &error.reason,
+                        retain_snapshot: error.retain_recovery,
+                    },
+                })
+                .collect(),
+        }
+    }
+
     pub fn new() -> Self {
         let id = SessionId::new();
         Self {
@@ -129,6 +266,15 @@ impl Workspace {
     }
 
     fn admit_edit(&self, id: SessionId, prepared: &PreparedEdit) -> Result<u64, WorkspaceError> {
+        let original = &self.session(id)?.editor;
+        if self
+            .manifest_bound()
+            .saturating_sub(crate::recovery::editor_manifest_bound(original))
+            .saturating_add(prepared.manifest_bound(original))
+            > crate::document::MAX_FILE_BYTES
+        {
+            return Err(WorkspaceError("Workspace recovery metadata capacity exceeded; the previous map and drafts were retained.".into()));
+        }
         let growth = self.estimated_bytes() - self.session(id)?.editor.estimated_bytes()
             + prepared.estimated_bytes();
         if growth > self.storage_limit {
@@ -320,6 +466,15 @@ impl Workspace {
         if self.entries.contains_key(&id) {
             return Err(WorkspaceError(
                 "A map with this session identity is already open.".into(),
+            ));
+        }
+        if self
+            .manifest_bound()
+            .saturating_add(crate::recovery::editor_manifest_bound(&map.editor))
+            > crate::document::MAX_FILE_BYTES
+        {
+            return Err(WorkspaceError(
+                "Workspace recovery metadata capacity exceeded; no tab was added.".into(),
             ));
         }
         if self.estimated_bytes() + map.estimated_bytes() + 128 + std::mem::size_of::<SessionId>()

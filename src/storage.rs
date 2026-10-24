@@ -12,6 +12,33 @@ use thiserror::Error;
 #[error("{0}")]
 pub struct StorageError(pub String);
 
+pub fn serialize_bounded<T: Serialize>(value: &T) -> Result<Vec<u8>, StorageError> {
+    let size = serialized_size_bounded(value)?;
+    let mut bytes = Vec::with_capacity(size);
+    serde_json::to_writer(&mut bytes, value).map_err(|error| StorageError(error.to_string()))?;
+    Ok(bytes)
+}
+
+pub fn serialized_size_bounded<T: Serialize>(value: &T) -> Result<usize, StorageError> {
+    struct Counter(usize);
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .filter(|size| *size <= MAX_FILE_BYTES)
+                .ok_or_else(|| std::io::Error::other("Serialized JSON exceeds 32 MiB"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Counter(0);
+    serde_json::to_writer(&mut count, value).map_err(|error| StorageError(error.to_string()))?;
+    Ok(count.0)
+}
+
 fn failure(path: &Path, cause: impl std::fmt::Display) -> StorageError {
     StorageError(format!("{}: {cause}", path.display()))
 }
@@ -70,6 +97,12 @@ pub struct RecoveryStore {
 }
 
 impl RecoveryStore {
+    pub(crate) fn directory(&self) -> &Path {
+        self.path
+            .parent()
+            .expect("recovery store has a parent directory")
+    }
+
     pub fn open(directory: PathBuf) -> Result<Self, StorageError> {
         fs::create_dir_all(&directory).map_err(|e| failure(&directory, e))?;
         let lock_path = directory.join("instance.lock");
@@ -110,7 +143,7 @@ impl RecoveryStore {
         Ok(Some(record))
     }
 
-    fn validate(record: &RecoveryRecord) -> Result<(), StorageError> {
+    pub(crate) fn validate(record: &RecoveryRecord) -> Result<(), StorageError> {
         if record.version != 1 || uuid::Uuid::parse_str(&record.document_id).is_err() {
             return Err(StorageError(
                 "Unsupported or malformed recovery identity".into(),

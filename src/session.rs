@@ -124,6 +124,7 @@ impl MapSession {
 pub struct RestoreFailure {
     pub path: Option<PathBuf>,
     pub reason: String,
+    pub retain_recovery: bool,
 }
 
 pub enum SessionState {

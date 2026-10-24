@@ -1,6 +1,6 @@
 use branchline::{
     app::{Direction, Editor, EditorAction},
-    storage::{RecoveryRecord, RecoveryStore},
+    storage::RecoveryStore,
     ui::NativeApp,
 };
 use eframe::egui;
@@ -149,12 +149,15 @@ fn cancelled_draft_is_removed_from_debounced_recovery() {
         .text = "Canceled draft".into();
     std::thread::sleep(Duration::from_millis(750));
     render(&mut app, &ctx, vec![]);
-    let path = temp.path().join("recovery.json");
-    let record: RecoveryRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(
-        record.document.nodes[&record.document.root].text,
-        "Canceled draft"
-    );
+    let path = temp.path().join("workspace.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let snapshot = manifest["tabs"][0]["snapshot"]["id"].as_str().unwrap();
+    let document = branchline::interchange::read_native(
+        &std::fs::read(temp.path().join(format!("snapshot-{snapshot}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(document.nodes[&document.root].text, "Canceled draft");
     key(&mut app, &ctx, egui::Key::Escape);
     assert_eq!(
         app.workspace.map().editor.document.nodes[&app.workspace.map().editor.document.root].text,
@@ -162,8 +165,10 @@ fn cancelled_draft_is_removed_from_debounced_recovery() {
     );
     std::thread::sleep(Duration::from_millis(750));
     render(&mut app, &ctx, vec![]);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert!(
-        !path.exists(),
+        manifest["tabs"][0]["snapshot"].is_null(),
         "An explicitly canceled draft must not be restored later"
     );
 }

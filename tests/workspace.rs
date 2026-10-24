@@ -111,7 +111,7 @@ fn workspace_growth_is_admitted_atomically() {
 
 #[test]
 fn maximum_supported_map_opens_beside_pristine_blank() {
-    use branchline::document::{Document, MAX_FILE_BYTES, MAX_NODES, Node, Side};
+    use branchline::document::{Command, Document, MAX_FILE_BYTES, MAX_NODES, Node, Side};
     use branchline::interchange::write_native;
     let mut document = Document::new("");
     let root = document.root.clone();
@@ -158,6 +158,35 @@ fn maximum_supported_map_opens_beside_pristine_blank() {
     assert_eq!(workspace.len(), 2);
     assert!(workspace.session(blank).unwrap().is_pristine_blank());
     assert!(workspace.estimated_bytes() <= 256 * 1024 * 1024);
+    workspace.apply_pending_activation().unwrap();
+    let root = workspace.map().editor.document.root.clone();
+    let text = workspace.map().editor.document.nodes[&root]
+        .text
+        .replacen('x', "y", 1);
+    workspace
+        .apply(
+            workspace.active_id(),
+            EditorEdit::Command(Command::SetText { id: root, text }),
+        )
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let mut recovery =
+        branchline::recovery::RecoveryCoordinator::open(directory.path().into()).unwrap();
+    recovery.publish(&workspace.recovery_state()).unwrap();
+    let snapshot = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("snapshot-")
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(snapshot).unwrap().len(),
+        MAX_FILE_BYTES as u64
+    );
 }
 
 #[test]

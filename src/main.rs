@@ -1,11 +1,11 @@
-use branchline::{storage::RecoveryStore, ui::NativeApp};
+use branchline::{recovery::RecoveryCoordinator, ui::NativeApp};
 use directories::ProjectDirs;
 use eframe::egui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directories = ProjectDirs::from("org", "Branchline", "Branchline")
         .ok_or("Cannot locate the platform application-data directory")?;
-    let store = RecoveryStore::open(directories.data_local_dir().into())?;
+    let store = RecoveryCoordinator::open(directories.data_local_dir().into())?;
     let app = NativeApp::new(store)?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

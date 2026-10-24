@@ -104,17 +104,31 @@ with earlier Branchline builds; the visible product and app bundle are BMM.
 The source directory and Cargo executable remain named `branchline`.
 Saves use a flushed temporary
 sibling and atomic replacement. Save As and export explicitly confirm existing
-destinations. New/Open/Quit ask Save, Discard or Cancel when there are changes;
-failed/cancelled saves do not continue the pending action.
+destinations. New and Open add independent tabs without replacing an existing
+map or committing its unfinished text. Failed/cancelled saves retain that work.
 
-Recovery is debounced by 700 ms after changes, including unfinished inline
-text and notes. It is separate from the original document. On macOS it lives in
-`~/Library/Application Support/org.Branchline.Branchline/recovery.json`
-(the exact platform path is selected by the `directories` crate). A filesystem
-lock allows one instance per recovery store. A second instance reports an error
-rather than competing over recovery. On startup, choose Restore or Discard.
-Malformed snapshots are retained and reported, not silently overwritten; move
-the reported file aside manually if you want to preserve it and start afresh.
+Recovery tracks each tab independently with a 700 ms idle delay, including
+unfinished inline text and notes without committing them to undo history.
+On macOS, `~/Library/Application Support/org.Branchline.Branchline/` contains
+`workspace.json` and immutable UUID-named `snapshot-*.json` files (the exact
+platform path is selected by the `directories` crate). One filesystem lock
+protects the entire workspace. Saved tabs reopen from current disk contents;
+unsaved snapshots offer Restore or Discard. Missing files and individual
+snapshot failures remain explicit error tabs while valid siblings survive.
+
+Snapshots are written and flushed before atomic manifest replacement. Only
+superseded snapshots with verified filesystem ownership are removed afterward;
+failed cleanup remains recorded for retry. Unknown or replaced files are
+retained, not glob-deleted. Malformed global manifests block destructive writes.
+Version-1 `recovery.json` migrates only after a verified nonoverwriting
+`recovery-v1.backup.json`; both legacy files are retained. Each native file,
+snapshot and manifest is bounded at 32 MiB, including JSON escaping.
+
+Persistent snapshot ownership currently uses Unix device/inode and creation
+time, exercised on macOS. Platforms/filesystems without that proof report
+unresolved ownership rather than deleting files. File flushing and atomic
+replacement are not a guarantee against every OS, filesystem, storage or
+power-loss failure; parent-directory changes are not separately fsynced.
 
 Errors remain visible in the status area. Recovery errors do not imply a
 successful snapshot. Undo history uses bounded snapshot storage and reports

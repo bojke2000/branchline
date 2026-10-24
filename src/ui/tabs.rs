@@ -123,7 +123,6 @@ impl NativeApp {
             self.galleys.clear();
             self.branch_colors.clear();
             self.placed = Layout::default();
-            self.recovery_revision = None;
             self.input_after_switch = true;
         }
         self.report(result);

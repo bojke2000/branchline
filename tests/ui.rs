@@ -161,15 +161,19 @@ fn recovery_keeps_uncommitted_inline_text() {
         .unwrap()
         .text = "Still typing 研究".into();
     app.checkpoint_recovery().unwrap();
-    let bytes = std::fs::read(temp.path().join("recovery.json")).unwrap();
-    let record: branchline::storage::RecoveryRecord = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        record.document.nodes[&record.document.root].text,
-        "Still typing 研究"
-    );
     assert_eq!(
         app.workspace.map().editor.document.nodes[&app.workspace.map().editor.document.root].text,
         "Central idea"
     );
     assert!(app.workspace.map().editor.editing.is_some());
+    drop(app);
+    let restore = branchline::recovery::RecoveryCoordinator::open(temp.path().into())
+        .unwrap()
+        .load()
+        .unwrap();
+    let branchline::recovery::RestoreContent::Recovered(document) = &restore.sessions[0].content
+    else {
+        panic!("inline recovery");
+    };
+    assert_eq!(document.nodes[&document.root].text, "Still typing 研究");
 }

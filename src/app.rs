@@ -112,6 +112,13 @@ pub struct PreparedSave {
 }
 
 impl PreparedEdit {
+    pub(crate) fn manifest_bound(&self, original: &Editor) -> usize {
+        crate::recovery::editor_manifest_bound(match &self.kind {
+            PreparedKind::Editor(editor) => editor,
+            PreparedKind::Draft { .. } => original,
+        })
+    }
+
     pub fn estimated_bytes(&self) -> usize {
         self.estimated_bytes
     }
