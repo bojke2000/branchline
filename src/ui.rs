@@ -30,7 +30,6 @@ enum Dialog {
     CloseDecision(SessionId),
     Paste(paste::PendingPaste),
     CopyOutline(crate::outline_format::OutlineCopy),
-    Recovery,
     Import,
     Delete(DeletionPlan),
     MermaidExport {
@@ -55,7 +54,6 @@ mod workspace_dialogs;
 pub struct NativeApp {
     pub workspace: Workspace,
     store: RecoveryCoordinator,
-    recovery_pending: bool,
     dialog: Option<Dialog>,
     error: Option<String>,
     status: String,
@@ -95,20 +93,13 @@ impl NativeApp {
         clipboard: Box<dyn crate::clipboard::OutlineClipboard>,
     ) -> Result<Self, StorageError> {
         let restore = store.load()?;
-        let recovery_pending = restore.has_recovery();
         let notices = restore.warnings.join("\n");
-        let dialog = recovery_pending.then_some(Dialog::Recovery);
-        let workspace = if recovery_pending {
-            Workspace::new()
-        } else {
-            Workspace::from_restore(restore, true)
-                .map_err(|cause| StorageError(cause.to_string()))?
-        };
+        let workspace = Workspace::from_restore(restore, true)
+            .map_err(|cause| StorageError(cause.to_string()))?;
         Ok(Self {
             workspace,
             store,
-            recovery_pending,
-            dialog,
+            dialog: None,
             error: (!notices.is_empty()).then_some(notices),
             status: "Local by design. Your ideas stay on this computer.".into(),
             placed: Layout::default(),
@@ -163,30 +154,6 @@ impl NativeApp {
                 "Workspace recovery was published; snapshot cleanup remains pending: {cause}"
             ));
         }
-        Ok(())
-    }
-
-    fn resolve_recovery(&mut self, recover: bool) -> Result<(), EditorError> {
-        let restore = self.store.load()?;
-        let workspace = Workspace::from_restore(restore, recover)?;
-        if !recover {
-            let publication = self.store.publish(&workspace.recovery_state())?;
-            if let Some(cause) = publication.cleanup_error {
-                self.error = Some(format!(
-                    "Recovery decisions were published; snapshot cleanup remains pending: {cause}"
-                ));
-            }
-        }
-        self.workspace = workspace;
-        self.recovery_pending = false;
-        self.layout_revision = None;
-        self.layout_session = None;
-        self.galleys.clear();
-        self.branch_colors.clear();
-        self.placed = Layout::default();
-        self.drag = None;
-        self.edit_focus = None;
-        self.input_after_switch = true;
         Ok(())
     }
 
@@ -1859,19 +1826,6 @@ impl NativeApp {
                                 keep = false;
                                 let progress = self.workspace.resolve(decision).map_err(EditorError::from);
                                 self.drive_transition(progress, ctx);
-                            }
-                        }
-                    });
-                }
-                Dialog::Recovery => {
-                    ui.heading("Your ideas are still here");
-                    ui.label("Local snapshots contain unsaved maps and unfinished edits. Restore all available work, or discard unsaved work and reopen saved maps from disk.");
-                    ui.horizontal(|ui| {
-                        for (label, recover) in [("Restore", true), ("Discard unsaved work", false)] {
-                            if ui.button(label).clicked() {
-                                let result = self.resolve_recovery(recover);
-                                if result.is_ok() { keep = false; }
-                                self.report(result);
                             }
                         }
                     });

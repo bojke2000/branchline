@@ -467,8 +467,8 @@ fn unreferenced_snapshot_is_reported_and_never_glob_deleted() {
 }
 
 #[test]
-fn restore_prompt_handles_a_failed_active_tab_and_keeps_valid_siblings() {
-    use eframe::egui::{self, Event};
+fn startup_restores_valid_siblings_without_prompting_on_a_failed_active_tab() {
+    use eframe::egui;
     let temp = tempfile::tempdir().unwrap();
     let mut store = RecoveryCoordinator::open(temp.path().join("recovery")).unwrap();
     let mut workspace = Workspace::new();
@@ -487,6 +487,9 @@ fn restore_prompt_handles_a_failed_active_tab_and_keeps_valid_siblings() {
         RecoveryCoordinator::open(temp.path().join("recovery")).unwrap(),
     )
     .unwrap();
+    assert_eq!(app.workspace.order(), &[first, second]);
+    assert_eq!(app.workspace.active_id(), first);
+    assert!(app.workspace.session(first).is_err());
     let ctx = egui::Context::default();
     let mut render = |events| {
         let mut output = ctx.run_ui(
@@ -509,27 +512,14 @@ fn restore_prompt_handles_a_failed_active_tab_and_keeps_valid_siblings() {
     };
     render(vec![]);
     let shapes = render(vec![]);
-    fn restore_position(shapes: &[egui::Shape]) -> Option<egui::Pos2> {
-        shapes.iter().find_map(|shape| match shape {
-            egui::Shape::Text(text) if text.galley.job.text == "Restore" => {
-                Some(text.pos + text.galley.size() * 0.5)
-            }
-            egui::Shape::Vec(children) => restore_position(children),
-            _ => None,
+    fn has_restore_prompt(shapes: &[egui::Shape]) -> bool {
+        shapes.iter().any(|shape| match shape {
+            egui::Shape::Text(text) if text.galley.job.text == "Restore" => true,
+            egui::Shape::Vec(children) => has_restore_prompt(children),
+            _ => false,
         })
     }
-    let pos = restore_position(&shapes).expect("recovery prompt");
-    for pressed in [true, false] {
-        render(vec![
-            Event::PointerMoved(pos),
-            Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ]);
-    }
+    assert!(!has_restore_prompt(&shapes));
     assert_eq!(app.workspace.active_id(), first);
     assert!(app.workspace.session(first).is_err());
     let map = app.workspace.session(second).unwrap();
@@ -538,6 +528,54 @@ fn restore_prompt_handles_a_failed_active_tab_and_keeps_valid_siblings() {
         "Preserved sibling"
     );
     assert!(map.editor.is_dirty());
+}
+
+#[test]
+fn startup_automatically_recovers_drafts_and_clean_tabs_without_rewriting_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let recovery = temp.path().join("recovery");
+    let mut store = RecoveryCoordinator::open(recovery.clone()).unwrap();
+    let mut workspace = Workspace::new();
+    let saved = workspace.active_id();
+    let native = temp.path().join("saved.branchline");
+    workspace.save(saved, &native).unwrap();
+    let native_before = fs::read(&native).unwrap();
+    let draft = workspace.new_map().unwrap();
+    workspace.apply_pending_activation().unwrap();
+    workspace
+        .apply(draft, EditorEdit::Action(EditorAction::Edit))
+        .unwrap();
+    let root = workspace.map().editor.selected.clone();
+    workspace
+        .apply(
+            draft,
+            EditorEdit::SetDraft {
+                field: DraftField::Inline(root),
+                text: "Resume this unfinished thought".into(),
+            },
+        )
+        .unwrap();
+    workspace.map_mut().viewport.pan.x = 123.0;
+    store.publish(&workspace.recovery_state()).unwrap();
+    let manifest_before = fs::read(recovery.join("workspace.json")).unwrap();
+    drop(store);
+    let app = branchline::ui::NativeApp::new(RecoveryCoordinator::open(recovery.clone()).unwrap())
+        .unwrap();
+    assert_eq!(app.workspace.order(), &[saved, draft]);
+    assert_eq!(app.workspace.active_id(), draft);
+    let editor = &app.workspace.map().editor;
+    assert_eq!(
+        editor.document.nodes[&editor.document.root].text,
+        "Resume this unfinished thought"
+    );
+    assert!(editor.is_dirty());
+    assert!(!app.workspace.session(saved).unwrap().editor.is_dirty());
+    assert_eq!(app.workspace.map().viewport.pan.x, 123.0);
+    assert_eq!(fs::read(&native).unwrap(), native_before);
+    assert_eq!(
+        fs::read(recovery.join("workspace.json")).unwrap(),
+        manifest_before
+    );
 }
 
 #[test]

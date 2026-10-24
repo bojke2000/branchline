@@ -165,7 +165,9 @@ On macOS, `~/Library/Application Support/org.Branchline.Branchline/` contains
 `workspace.json` and immutable UUID-named `snapshot-*.json` files (the exact
 platform path is selected by the `directories` crate). One filesystem lock
 protects the entire workspace. Saved tabs reopen from current disk contents;
-unsaved snapshots offer Restore or Discard. Missing files and individual
+unsaved snapshots and unfinished text restore automatically without a startup
+confirmation. Restored unsaved work stays dirty until explicitly saved.
+Missing files and individual
 snapshot failures remain explicit error tabs while valid siblings survive.
 
 Snapshots are written and flushed before atomic manifest replacement. Only
@@ -272,7 +274,7 @@ on Escape, outside release or an intervening unsaved-changes dialog.
 
 Executed on this Mac: `cargo fmt --check` passed;
 `cargo clippy --all-targets -- -D warnings` passed;
-`cargo test --locked` passed (148 tests; one optional parser test ignored);
+`cargo test --locked` passed (149 tests; one optional parser test ignored);
 `cargo build --release --locked` and `sh scripts/bundle.sh` passed.
 These results do not establish the unverified native scenarios listed below.
 

@@ -3,7 +3,6 @@ use super::*;
 impl NativeApp {
     pub(super) fn debounce_recovery(&mut self, ctx: &egui::Context) {
         if !self.allow_close
-            && !self.recovery_pending
             && self.dialog.is_none()
             && self
                 .store
