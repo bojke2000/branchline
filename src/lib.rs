@@ -8,3 +8,4 @@ pub mod layout;
 pub mod session;
 pub mod storage;
 pub mod ui;
+pub mod workspace;

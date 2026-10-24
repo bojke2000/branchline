@@ -123,11 +123,21 @@ fn dragging_the_selected_root_translates_the_entire_map_without_editing_it() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
     for label in ["Pan right branch", "Pan left branch"] {
-        let root = app.editor.document.root.clone();
-        app.editor.select(&root).unwrap();
-        app.editor.dispatch(EditorAction::AddChild).unwrap();
-        app.editor.editing.as_mut().unwrap().text = label.into();
-        app.editor.commit_edit().unwrap();
+        let root = app.workspace.map().editor.document.root.clone();
+        app.workspace.map_mut().editor.select(&root).unwrap();
+        app.workspace
+            .map_mut()
+            .editor
+            .dispatch(EditorAction::AddChild)
+            .unwrap();
+        app.workspace
+            .map_mut()
+            .editor
+            .editing
+            .as_mut()
+            .unwrap()
+            .text = label.into();
+        app.workspace.map_mut().editor.commit_edit().unwrap();
     }
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
@@ -138,9 +148,12 @@ fn dragging_the_selected_root_translates_the_entire_map_without_editing_it() {
         text_center(&shapes, "Central idea").unwrap(),
         egui::PointerButton::Primary,
     );
-    assert_eq!(app.editor.selected, app.editor.document.root);
-    let before = app.editor.document.clone();
-    let generation = app.editor.history.generation;
+    assert_eq!(
+        app.workspace.map().editor.selected,
+        app.workspace.map().editor.document.root
+    );
+    let before = app.workspace.map().editor.document.clone();
+    let generation = app.workspace.map().editor.history.generation;
     for delta in [egui::vec2(160.0, 90.0), egui::vec2(-230.0, -150.0)] {
         let shapes = render(&mut app, &ctx, vec![]);
         let labels = ["Central idea", "Pan right branch", "Pan left branch"];
@@ -156,9 +169,10 @@ fn dragging_the_selected_root_translates_the_entire_map_without_editing_it() {
                 "{label} must follow the root drag by {delta:?}, not stay at {actual:?}"
             );
         }
-        assert_eq!(app.editor.document, before);
+        assert_eq!(app.workspace.map().editor.document, before);
         assert_eq!(
-            app.editor.history.generation, generation,
+            app.workspace.map().editor.history.generation,
+            generation,
             "Panning must not add document undo steps"
         );
     }
@@ -194,20 +208,28 @@ fn root_panning_survives_leaving_the_canvas_and_escape_restores_the_view() {
         (text_center(&shapes, "Central idea").unwrap() - from).length() < 0.5,
         "Cancel must restore the view without changing the root's tree identity"
     );
-    assert!(!app.editor.is_dirty());
+    assert!(!app.workspace.map().editor.is_dirty());
 }
 
 #[test]
 fn alt_shift_arrows_pan_without_reparenting_and_stay_local_in_text_fields() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.commit_edit().unwrap();
-    app.editor.dispatch(EditorAction::AddSibling).unwrap();
-    app.editor.commit_edit().unwrap();
-    let selected = app.editor.selected.clone();
-    let before = app.editor.document.clone();
-    let generation = app.editor.history.generation;
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddSibling)
+        .unwrap();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let selected = app.workspace.map().editor.selected.clone();
+    let before = app.workspace.map().editor.document.clone();
+    let generation = app.workspace.map().editor.history.generation;
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     render(&mut app, &ctx, vec![]);
@@ -245,11 +267,15 @@ fn alt_shift_arrows_pan_without_reparenting_and_stay_local_in_text_fields() {
         send(&mut app, key);
         let shapes = render(&mut app, &ctx, vec![]);
         assert!((text_center(&shapes, "Central idea").unwrap() - root - delta).length() < 0.5);
-        assert_eq!(app.editor.document, before);
-        assert_eq!(app.editor.selected, selected);
-        assert_eq!(app.editor.history.generation, generation);
+        assert_eq!(app.workspace.map().editor.document, before);
+        assert_eq!(app.workspace.map().editor.selected, selected);
+        assert_eq!(app.workspace.map().editor.history.generation, generation);
     }
-    app.editor.dispatch(EditorAction::Edit).unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::Edit)
+        .unwrap();
     let shapes = render(&mut app, &ctx, vec![]);
     let root = text_center(&shapes, "Central idea").unwrap();
     send(&mut app, egui::Key::ArrowRight);
@@ -264,8 +290,8 @@ fn alt_shift_arrows_pan_without_reparenting_and_stay_local_in_text_fields() {
 fn typing_replaces_the_active_label_once_with_cancel_commit_and_undo() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    let before = app.editor.document.clone();
-    let generation = app.editor.history.generation;
+    let before = app.workspace.map().editor.document.clone();
+    let generation = app.workspace.map().editor.history.generation;
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let shapes = render(&mut app, &ctx, vec![]);
@@ -276,12 +302,30 @@ fn typing_replaces_the_active_label_once_with_cancel_commit_and_undo() {
         egui::PointerButton::Primary,
     );
     let shapes = render(&mut app, &ctx, vec![egui::Event::Text("N".into())]);
-    assert_eq!(app.editor.editing.as_ref().unwrap().text, "N");
+    assert_eq!(
+        app.workspace
+            .map_mut()
+            .editor
+            .editing
+            .as_ref()
+            .unwrap()
+            .text,
+        "N"
+    );
     assert!(text_center(&shapes, "Central idea").is_none());
     assert!(text_center(&shapes, "N").is_some());
     render(&mut app, &ctx, vec![egui::Event::Text("ew idea".into())]);
-    assert_eq!(app.editor.editing.as_ref().unwrap().text, "New idea");
-    assert_eq!(app.editor.document, before);
+    assert_eq!(
+        app.workspace
+            .map_mut()
+            .editor
+            .editing
+            .as_ref()
+            .unwrap()
+            .text,
+        "New idea"
+    );
+    assert_eq!(app.workspace.map().editor.document, before);
     render(
         &mut app,
         &ctx,
@@ -293,12 +337,21 @@ fn typing_replaces_the_active_label_once_with_cancel_commit_and_undo() {
             modifiers: egui::Modifiers::NONE,
         }],
     );
-    assert!(app.editor.editing.is_none());
-    assert_eq!(app.editor.document, before);
-    assert_eq!(app.editor.history.generation, generation);
+    assert!(app.workspace.map().editor.editing.is_none());
+    assert_eq!(app.workspace.map().editor.document, before);
+    assert_eq!(app.workspace.map().editor.history.generation, generation);
     render(&mut app, &ctx, vec![egui::Event::Text("Caf\u{e9}".into())]);
     render(&mut app, &ctx, vec![egui::Event::Text(" notes".into())]);
-    assert_eq!(app.editor.editing.as_ref().unwrap().text, "Caf\u{e9} notes");
+    assert_eq!(
+        app.workspace
+            .map_mut()
+            .editor
+            .editing
+            .as_ref()
+            .unwrap()
+            .text,
+        "Caf\u{e9} notes"
+    );
     render(
         &mut app,
         &ctx,
@@ -310,26 +363,41 @@ fn typing_replaces_the_active_label_once_with_cancel_commit_and_undo() {
             modifiers: egui::Modifiers::NONE,
         }],
     );
-    assert!(app.editor.editing.is_none());
+    assert!(app.workspace.map().editor.editing.is_none());
     assert_eq!(
-        app.editor.document.nodes[&app.editor.document.root].text,
+        app.workspace.map().editor.document.nodes[&app.workspace.map().editor.document.root].text,
         "Caf\u{e9} notes"
     );
-    assert_eq!(app.editor.history.generation, generation + 1);
-    app.editor.dispatch(EditorAction::Undo).unwrap();
-    assert_eq!(app.editor.document, before);
+    assert_eq!(
+        app.workspace.map().editor.history.generation,
+        generation + 1
+    );
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::Undo)
+        .unwrap();
+    assert_eq!(app.workspace.map().editor.document, before);
 }
 
 #[test]
 fn typing_stays_in_search_then_replaces_only_the_active_multiselected_node() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.commit_edit().unwrap();
-    let root = app.editor.document.root.clone();
-    app.editor.toggle_selection(&root).unwrap();
-    assert_eq!(app.editor.selection().len(), 2);
-    let before = app.editor.document.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let root = app.workspace.map().editor.document.root.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .toggle_selection(&root)
+        .unwrap();
+    assert_eq!(app.workspace.map().editor.selection().len(), 2);
+    let before = app.workspace.map().editor.document.clone();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     render(&mut app, &ctx, vec![]);
@@ -360,8 +428,8 @@ fn typing_stays_in_search_then_replaces_only_the_active_multiselected_node() {
             egui::Event::Text("needle".into()),
         ],
     );
-    assert!(app.editor.editing.is_none());
-    assert_eq!(app.editor.document, before);
+    assert!(app.workspace.map().editor.editing.is_none());
+    assert_eq!(app.workspace.map().editor.document, before);
     render(
         &mut app,
         &ctx,
@@ -378,15 +446,18 @@ fn typing_stays_in_search_then_replaces_only_the_active_multiselected_node() {
         &ctx,
         vec![egui::Event::Text("Replacement".into())],
     );
-    let buffer = app.editor.editing.as_ref().unwrap();
+    let buffer = app.workspace.map().editor.editing.as_ref().unwrap();
     assert_eq!(buffer.id, root);
     assert_eq!(buffer.text, "Replacement");
-    assert_eq!(app.editor.selection().len(), 1);
-    app.editor.commit_edit().unwrap();
-    assert_eq!(app.editor.document.nodes[&root].text, "Replacement");
+    assert_eq!(app.workspace.map().editor.selection().len(), 1);
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    assert_eq!(
+        app.workspace.map().editor.document.nodes[&root].text,
+        "Replacement"
+    );
     for (id, node) in &before.nodes {
         if id != &root {
-            assert_eq!(&app.editor.document.nodes[id], node);
+            assert_eq!(&app.workspace.map().editor.document.nodes[id], node);
         }
     }
 }
@@ -395,7 +466,7 @@ fn typing_stays_in_search_then_replaces_only_the_active_multiselected_node() {
 fn ime_composition_can_start_a_replacement_without_committing_the_old_label() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    let before = app.editor.document.clone();
+    let before = app.workspace.map().editor.document.clone();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     render(&mut app, &ctx, vec![]);
@@ -407,14 +478,23 @@ fn ime_composition_can_start_a_replacement_without_committing_the_old_label() {
             active_range_chars: Some(0..1),
         })],
     );
-    assert!(app.editor.editing.is_some());
+    assert!(app.workspace.map().editor.editing.is_some());
     render(
         &mut app,
         &ctx,
         vec![egui::Event::Ime(egui::ImeEvent::Commit("\u{65b0}".into()))],
     );
-    assert_eq!(app.editor.editing.as_ref().unwrap().text, "\u{65b0}");
-    assert_eq!(app.editor.document, before);
+    assert_eq!(
+        app.workspace
+            .map_mut()
+            .editor
+            .editing
+            .as_ref()
+            .unwrap()
+            .text,
+        "\u{65b0}"
+    );
+    assert_eq!(app.workspace.map().editor.document, before);
     render(
         &mut app,
         &ctx,
@@ -426,12 +506,12 @@ fn ime_composition_can_start_a_replacement_without_committing_the_old_label() {
             modifiers: egui::Modifiers::NONE,
         }],
     );
-    assert!(app.editor.editing.is_none());
+    assert!(app.workspace.map().editor.editing.is_none());
     assert_eq!(
-        app.editor.document.nodes[&app.editor.document.root].text,
+        app.workspace.map().editor.document.nodes[&app.workspace.map().editor.document.root].text,
         "\u{65b0}"
     );
-    let committed = app.editor.document.clone();
+    let committed = app.workspace.map().editor.document.clone();
     render(
         &mut app,
         &ctx,
@@ -440,25 +520,42 @@ fn ime_composition_can_start_a_replacement_without_committing_the_old_label() {
         ))],
     );
     assert!(
-        app.editor.editing.is_none(),
+        app.workspace.map().editor.editing.is_none(),
         "An IME commit without an owned draft must not replace another label"
     );
-    assert_eq!(app.editor.document, committed);
+    assert_eq!(app.workspace.map().editor.document, committed);
 }
 
 #[test]
 fn branch_underlines_share_their_root_branch_color() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    let first = app.editor.selected.clone();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.commit_edit().unwrap();
-    let root = app.editor.document.root.clone();
-    app.editor.select(&root).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.commit_edit().unwrap();
-    assert_eq!(app.editor.document.nodes[&first].children.len(), 1);
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    let first = app.workspace.map().editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let root = app.workspace.map().editor.document.root.clone();
+    app.workspace.map_mut().editor.select(&root).unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    assert_eq!(
+        app.workspace.map().editor.document.nodes[&first]
+            .children
+            .len(),
+        1
+    );
     let ctx = egui::Context::default();
     let shapes = render(&mut app, &ctx, vec![]);
     let colors: Vec<_> = shapes
@@ -490,38 +587,75 @@ fn branch_underlines_share_their_root_branch_color() {
 fn right_click_targets_that_node_and_executes_the_shared_creation_command() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "First target".into();
-    app.editor.commit_edit().unwrap();
-    let first = app.editor.selected.clone();
-    app.editor.dispatch(EditorAction::AddSibling).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Second target".into();
-    app.editor.commit_edit().unwrap();
-    let second = app.editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "First target".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let first = app.workspace.map().editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddSibling)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Second target".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let second = app.workspace.map().editor.selected.clone();
     let ctx = egui::Context::default();
     let shapes = render(&mut app, &ctx, vec![]);
     let node_pos = text_center(&shapes, "First target").unwrap();
     click(&mut app, &ctx, node_pos, egui::PointerButton::Secondary);
     let shapes = render(&mut app, &ctx, vec![]);
-    assert_eq!(app.editor.selected, first);
+    assert_eq!(app.workspace.map().editor.selected, first);
     let add_pos = text_center(&shapes, "Add child")
         .expect("Right-click menu must offer keyboard creation commands");
     click(&mut app, &ctx, add_pos, egui::PointerButton::Primary);
-    assert_eq!(app.editor.document.nodes[&first].children.len(), 1);
-    assert!(app.editor.document.nodes[&second].children.is_empty());
-    assert!(app.editor.editing.is_some());
+    assert_eq!(
+        app.workspace.map().editor.document.nodes[&first]
+            .children
+            .len(),
+        1
+    );
+    assert!(
+        app.workspace.map().editor.document.nodes[&second]
+            .children
+            .is_empty()
+    );
+    assert!(app.workspace.map().editor.editing.is_some());
 }
 
 #[test]
 fn shift_arrows_reorder_siblings_but_not_text_editing() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.commit_edit().unwrap();
-    let first = app.editor.selected.clone();
-    app.editor.dispatch(EditorAction::AddSibling).unwrap();
-    app.editor.commit_edit().unwrap();
-    let second = app.editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let first = app.workspace.map().editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddSibling)
+        .unwrap();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let second = app.workspace.map().editor.selected.clone();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let shift = egui::Modifiers::SHIFT;
@@ -544,19 +678,27 @@ fn shift_arrows_reorder_siblings_but_not_text_editing() {
         }
     };
     send(&mut app, egui::Key::ArrowUp, shift);
-    let root = app.editor.document.root.clone();
+    let root = app.workspace.map().editor.document.root.clone();
     assert_eq!(
-        app.editor.document.nodes[&root].children,
+        app.workspace.map().editor.document.nodes[&root].children,
         [second.clone(), first.clone()]
     );
     send(&mut app, egui::Key::ArrowDown, shift);
-    assert_eq!(app.editor.document.nodes[&root].children, [first, second]);
-    app.editor.dispatch(EditorAction::Edit).unwrap();
+    assert_eq!(
+        app.workspace.map().editor.document.nodes[&root].children,
+        [first, second]
+    );
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::Edit)
+        .unwrap();
     render(&mut app, &ctx, vec![]);
-    let before = app.editor.document.clone();
+    let before = app.workspace.map().editor.document.clone();
     send(&mut app, egui::Key::ArrowUp, shift);
     assert_eq!(
-        app.editor.document, before,
+        app.workspace.map().editor.document,
+        before,
         "Shift+arrows must stay inside text fields"
     );
 }
@@ -565,13 +707,33 @@ fn shift_arrows_reorder_siblings_but_not_text_editing() {
 fn shift_click_batch_delete_retains_root_and_undoes_as_one_operation() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Select first".into();
-    app.editor.commit_edit().unwrap();
-    let first = app.editor.selected.clone();
-    app.editor.dispatch(EditorAction::AddSibling).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Select second".into();
-    app.editor.commit_edit().unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Select first".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let first = app.workspace.map().editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddSibling)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Select second".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
     let ctx = egui::Context::default();
     let shapes = render(&mut app, &ctx, vec![]);
     click_with_modifiers(
@@ -581,8 +743,8 @@ fn shift_click_batch_delete_retains_root_and_undoes_as_one_operation() {
         egui::PointerButton::Primary,
         egui::Modifiers::SHIFT,
     );
-    assert_eq!(app.editor.selection().len(), 2);
-    assert!(app.editor.is_selected(&first));
+    assert_eq!(app.workspace.map().editor.selection().len(), 2);
+    assert!(app.workspace.map().editor.is_selected(&first));
     let shapes = render(&mut app, &ctx, vec![]);
     click_with_modifiers(
         &mut app,
@@ -591,8 +753,8 @@ fn shift_click_batch_delete_retains_root_and_undoes_as_one_operation() {
         egui::PointerButton::Primary,
         egui::Modifiers::SHIFT,
     );
-    assert_eq!(app.editor.selection().len(), 3);
-    let before = app.editor.document.clone();
+    assert_eq!(app.workspace.map().editor.selection().len(), 3);
+    let before = app.workspace.map().editor.document.clone();
     render(
         &mut app,
         &ctx,
@@ -609,15 +771,20 @@ fn shift_click_batch_delete_retains_root_and_undoes_as_one_operation() {
     );
     let shapes = render(&mut app, &ctx, vec![]);
     assert_eq!(
-        app.editor.document, before,
+        app.workspace.map().editor.document,
+        before,
         "Batch delete must wait for confirmation"
     );
     assert!(text_center(&shapes, "The central idea will be kept.").is_some());
     let confirm = text_center(&shapes, "Delete selected branches").unwrap();
     click(&mut app, &ctx, confirm, egui::PointerButton::Primary);
-    assert_eq!(app.editor.document.nodes.len(), 1);
-    app.editor.dispatch(EditorAction::Undo).unwrap();
-    assert_eq!(app.editor.document, before);
+    assert_eq!(app.workspace.map().editor.document.nodes.len(), 1);
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::Undo)
+        .unwrap();
+    assert_eq!(app.workspace.map().editor.document, before);
 }
 
 fn begin_drag(app: &mut NativeApp, ctx: &egui::Context, from: Pos2, to: Pos2) -> Vec<Shape> {
@@ -661,25 +828,46 @@ fn release_drag(app: &mut NativeApp, ctx: &egui::Context, to: Pos2) {
 fn dragging_previews_without_mutation_then_moves_and_undoes_a_subtree() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Drag source".into();
-    app.editor.commit_edit().unwrap();
-    let source = app.editor.selected.clone();
-    let root = app.editor.document.root.clone();
-    app.editor.select(&root).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Drop destination".into();
-    app.editor.commit_edit().unwrap();
-    let target = app.editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Drag source".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let source = app.workspace.map().editor.selected.clone();
+    let root = app.workspace.map().editor.document.root.clone();
+    app.workspace.map_mut().editor.select(&root).unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Drop destination".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let target = app.workspace.map().editor.selected.clone();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let shapes = render(&mut app, &ctx, vec![]);
     let from = text_center(&shapes, "Drag source").unwrap();
     let to = text_center(&shapes, "Drop destination").unwrap();
-    let before = app.editor.document.clone();
+    let before = app.workspace.map().editor.document.clone();
     let preview = begin_drag(&mut app, &ctx, from, to);
     assert_eq!(
-        app.editor.document, before,
+        app.workspace.map().editor.document,
+        before,
         "Hover previews must not change history or the map"
     );
     assert!(
@@ -687,34 +875,71 @@ fn dragging_previews_without_mutation_then_moves_and_undoes_a_subtree() {
         "A drop needs an explicit placement preview"
     );
     release_drag(&mut app, &ctx, to);
-    assert_eq!(app.editor.document.parent(&source), Some(target.as_str()));
-    assert_eq!(app.editor.selected, source);
-    app.editor.dispatch(EditorAction::Undo).unwrap();
-    assert_eq!(app.editor.document, before);
+    assert_eq!(
+        app.workspace.map().editor.document.parent(&source),
+        Some(target.as_str())
+    );
+    assert_eq!(app.workspace.map().editor.selected, source);
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::Undo)
+        .unwrap();
+    assert_eq!(app.workspace.map().editor.document, before);
 }
 
 #[test]
 fn drag_reordering_can_be_cancelled_and_cycles_are_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Drag parent".into();
-    app.editor.commit_edit().unwrap();
-    let parent = app.editor.selected.clone();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Drag descendant".into();
-    app.editor.commit_edit().unwrap();
-    app.editor.select(&parent).unwrap();
-    app.editor.dispatch(EditorAction::AddSibling).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Drag sibling".into();
-    app.editor.commit_edit().unwrap();
-    let sibling = app.editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Drag parent".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let parent = app.workspace.map().editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Drag descendant".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    app.workspace.map_mut().editor.select(&parent).unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddSibling)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Drag sibling".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let sibling = app.workspace.map().editor.selected.clone();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let shapes = render(&mut app, &ctx, vec![]);
     let from = text_center(&shapes, "Drag sibling").unwrap();
     let to = text_center(&shapes, "Drag parent").unwrap() - egui::vec2(0.0, 20.0);
-    let before = app.editor.document.clone();
+    let before = app.workspace.map().editor.document.clone();
     begin_drag(&mut app, &ctx, from, to);
     render(
         &mut app,
@@ -729,7 +954,8 @@ fn drag_reordering_can_be_cancelled_and_cycles_are_rejected() {
     );
     release_drag(&mut app, &ctx, to);
     assert_eq!(
-        app.editor.document, before,
+        app.workspace.map().editor.document,
+        before,
         "Escape must cancel before release"
     );
     let shapes = render(&mut app, &ctx, vec![]);
@@ -741,15 +967,15 @@ fn drag_reordering_can_be_cancelled_and_cycles_are_rejected() {
     );
     assert!(text_center(&preview, "Insert before topic").is_some());
     release_drag(&mut app, &ctx, to);
-    let root = app.editor.document.root.clone();
+    let root = app.workspace.map().editor.document.root.clone();
     assert_eq!(
-        app.editor.document.nodes[&root].children,
+        app.workspace.map().editor.document.nodes[&root].children,
         [sibling, parent.clone()]
     );
     let shapes = render(&mut app, &ctx, vec![]);
     let from = text_center(&shapes, "Drag parent").unwrap();
     let to = text_center(&shapes, "Drag descendant").unwrap();
-    let before = app.editor.document.clone();
+    let before = app.workspace.map().editor.document.clone();
     let preview = begin_drag(&mut app, &ctx, from, to);
     assert!(
         text_center(
@@ -760,7 +986,8 @@ fn drag_reordering_can_be_cancelled_and_cycles_are_rejected() {
     );
     release_drag(&mut app, &ctx, to);
     assert_eq!(
-        app.editor.document, before,
+        app.workspace.map().editor.document,
+        before,
         "Dropping onto a descendant must never corrupt the tree"
     );
 }
@@ -769,10 +996,20 @@ fn drag_reordering_can_be_cancelled_and_cycles_are_rejected() {
 fn dragging_a_top_level_branch_across_the_root_changes_its_side() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Switch side".into();
-    app.editor.commit_edit().unwrap();
-    let source = app.editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Switch side".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let source = app.workspace.map().editor.selected.clone();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let shapes = render(&mut app, &ctx, vec![]);
@@ -781,12 +1018,12 @@ fn dragging_a_top_level_branch_across_the_root_changes_its_side() {
     begin_drag(&mut app, &ctx, from, to);
     release_drag(&mut app, &ctx, to);
     assert_eq!(
-        app.editor.document.nodes[&source].side,
+        app.workspace.map().editor.document.nodes[&source].side,
         branchline::document::Side::Left
     );
     assert_eq!(
-        app.editor.document.parent(&source),
-        Some(app.editor.document.root.as_str())
+        app.workspace.map().editor.document.parent(&source),
+        Some(app.workspace.map().editor.document.root.as_str())
     );
 }
 
@@ -794,26 +1031,36 @@ fn dragging_a_top_level_branch_across_the_root_changes_its_side() {
 fn releasing_outside_the_canvas_cancels_without_leaking_drag_state() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Release outside".into();
-    app.editor.commit_edit().unwrap();
-    let source = app.editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Release outside".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let source = app.workspace.map().editor.selected.clone();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let shapes = render(&mut app, &ctx, vec![]);
     let from = text_center(&shapes, "Release outside").unwrap();
     let to = egui::pos2(-50.0, -50.0);
-    let before = app.editor.document.clone();
+    let before = app.workspace.map().editor.document.clone();
     begin_drag(&mut app, &ctx, from, to);
     release_drag(&mut app, &ctx, to);
-    assert_eq!(app.editor.document, before);
+    assert_eq!(app.workspace.map().editor.document, before);
     let shapes = render(&mut app, &ctx, vec![]);
     let from = text_center(&shapes, "Release outside").unwrap();
     let to = egui::pos2(150.0, 600.0);
     begin_drag(&mut app, &ctx, from, to);
     release_drag(&mut app, &ctx, to);
     assert_eq!(
-        app.editor.document.nodes[&source].side,
+        app.workspace.map().editor.document.nodes[&source].side,
         branchline::document::Side::Left
     );
 }
@@ -822,14 +1069,38 @@ fn releasing_outside_the_canvas_cancels_without_leaking_drag_state() {
 fn right_click_preserves_a_multi_selection_and_cancel_keeps_the_map() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Menu first".into();
-    app.editor.commit_edit().unwrap();
-    let first = app.editor.selected.clone();
-    app.editor.dispatch(EditorAction::AddSibling).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Menu second".into();
-    app.editor.commit_edit().unwrap();
-    app.editor.toggle_selection(&first).unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Menu first".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    let first = app.workspace.map().editor.selected.clone();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddSibling)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Menu second".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .toggle_selection(&first)
+        .unwrap();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let shapes = render(&mut app, &ctx, vec![]);
@@ -840,7 +1111,7 @@ fn right_click_preserves_a_multi_selection_and_cancel_keeps_the_map() {
         egui::PointerButton::Secondary,
     );
     let shapes = render(&mut app, &ctx, vec![]);
-    assert_eq!(app.editor.selection().len(), 2);
+    assert_eq!(app.workspace.map().editor.selection().len(), 2);
     assert!(text_center(&shapes, "2 selected ideas").is_some());
     click(
         &mut app,
@@ -849,26 +1120,40 @@ fn right_click_preserves_a_multi_selection_and_cancel_keeps_the_map() {
         egui::PointerButton::Primary,
     );
     let shapes = render(&mut app, &ctx, vec![]);
-    let before = app.editor.document.clone();
+    let before = app.workspace.map().editor.document.clone();
     click(
         &mut app,
         &ctx,
         text_center(&shapes, "Cancel").unwrap(),
         egui::PointerButton::Primary,
     );
-    assert_eq!(app.editor.document, before);
-    assert_eq!(app.editor.selection().len(), 2);
+    assert_eq!(app.workspace.map().editor.document, before);
+    assert_eq!(app.workspace.map().editor.selection().len(), 2);
 }
 
 #[test]
 fn reordering_root_branches_does_not_recolor_them() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Stable branch color".into();
-    app.editor.commit_edit().unwrap();
-    app.editor.dispatch(EditorAction::AddSibling).unwrap();
-    app.editor.commit_edit().unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Stable branch color".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddSibling)
+        .unwrap();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let before = render(&mut app, &ctx, vec![]);
@@ -891,7 +1176,11 @@ fn reordering_root_branches_does_not_recolor_them() {
             })
             .unwrap()
     };
-    app.editor.dispatch(EditorAction::MoveUp).unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::MoveUp)
+        .unwrap();
     let after = render(&mut app, &ctx, vec![]);
     assert_eq!(stroke(&before), stroke(&after));
 }
@@ -900,15 +1189,25 @@ fn reordering_root_branches_does_not_recolor_them() {
 fn opening_an_unsaved_dialog_cancels_a_drag_before_pointer_release() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
-    app.editor.dispatch(EditorAction::AddChild).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Close during drag".into();
-    app.editor.commit_edit().unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::AddChild)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Close during drag".into();
+    app.workspace.map_mut().editor.commit_edit().unwrap();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let shapes = render(&mut app, &ctx, vec![]);
     let from = text_center(&shapes, "Close during drag").unwrap();
     let to = egui::pos2(150.0, 600.0);
-    let before = app.editor.document.clone();
+    let before = app.workspace.map().editor.document.clone();
     begin_drag(&mut app, &ctx, from, to);
     let mut input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -929,7 +1228,8 @@ fn opening_an_unsaved_dialog_cancels_a_drag_before_pointer_release() {
     assert!(text_center(&shapes, "Keep these ideas?").is_some());
     release_drag(&mut app, &ctx, to);
     assert_eq!(
-        app.editor.document, before,
+        app.workspace.map().editor.document,
+        before,
         "A modal dialog must prevent a pending drop from committing"
     );
 }

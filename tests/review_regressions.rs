@@ -44,10 +44,10 @@ fn inline_creation_keeps_editing_reachable_beyond_the_viewport() {
     for _ in 0..14 {
         key(&mut app, &ctx, egui::Key::Tab);
     }
-    assert_eq!(app.editor.document.nodes.len(), 15);
+    assert_eq!(app.workspace.map().editor.document.nodes.len(), 15);
     key(&mut app, &ctx, egui::Key::Enter);
     assert!(
-        app.editor.editing.is_none(),
+        app.workspace.map().editor.editing.is_none(),
         "The active inline editor must remain reachable"
     );
 }
@@ -124,10 +124,10 @@ fn abandoning_ime_composition_releases_map_keyboard_ownership() {
             ],
         );
     }
-    assert!(app.editor.editing.is_none());
+    assert!(app.workspace.map().editor.editing.is_none());
     key(&mut app, &ctx, egui::Key::Tab);
     assert_eq!(
-        app.editor.document.nodes.len(),
+        app.workspace.map().editor.document.nodes.len(),
         2,
         "IME state must not outlive its widget"
     );
@@ -140,7 +140,13 @@ fn cancelled_draft_is_removed_from_debounced_recovery() {
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     key(&mut app, &ctx, egui::Key::F2);
-    app.editor.editing.as_mut().unwrap().text = "Canceled draft".into();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Canceled draft".into();
     std::thread::sleep(Duration::from_millis(750));
     render(&mut app, &ctx, vec![]);
     let path = temp.path().join("recovery.json");
@@ -151,7 +157,7 @@ fn cancelled_draft_is_removed_from_debounced_recovery() {
     );
     key(&mut app, &ctx, egui::Key::Escape);
     assert_eq!(
-        app.editor.document.nodes[&app.editor.document.root].text,
+        app.workspace.map().editor.document.nodes[&app.workspace.map().editor.document.root].text,
         "Central idea"
     );
     std::thread::sleep(Duration::from_millis(750));
@@ -203,7 +209,7 @@ fn palette_ime_confirmation_does_not_dispatch_a_map_command() {
     );
     key(&mut app, &ctx, egui::Key::Enter);
     assert_eq!(
-        app.editor.document.nodes.len(),
+        app.workspace.map().editor.document.nodes.len(),
         1,
         "IME confirmation belongs to the text field, not the command palette"
     );

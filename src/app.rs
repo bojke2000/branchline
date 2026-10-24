@@ -20,6 +20,8 @@ pub enum EditorError {
     Storage(#[from] StorageError),
     #[error("{0}")]
     State(String),
+    #[error("{0}")]
+    Workspace(#[from] crate::workspace::WorkspaceError),
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -4,6 +4,9 @@ use eframe::egui::{Key, Modifiers};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppCommand {
     New,
+    NextTab,
+    PreviousTab,
+    CloseTab,
     Open,
     Save,
     SaveAs,
@@ -58,6 +61,9 @@ pub const NAVIGATION_COMMANDS: &[AppCommand] = &[
 ];
 pub const FILE_COMMANDS: &[AppCommand] = &[
     AppCommand::New,
+    AppCommand::NextTab,
+    AppCommand::PreviousTab,
+    AppCommand::CloseTab,
     AppCommand::Open,
     AppCommand::Save,
     AppCommand::SaveAs,
@@ -86,13 +92,26 @@ enum Binding {
     AltShift(Key),
     Command(Key),
     CommandShift(Key),
+    ControlTab(bool),
 }
 
 impl Binding {
     fn matches(self, key: Key, modifiers: Modifiers) -> bool {
         match self {
+            Self::ControlTab(backwards) => {
+                key == Key::Tab
+                    && modifiers.ctrl
+                    && !modifiers.mac_cmd
+                    && !modifiers.alt
+                    && modifiers.shift == backwards
+            }
             Self::Plain(bound) => {
-                key == bound && !modifiers.command && !modifiers.alt && !modifiers.shift
+                key == bound
+                    && !modifiers.command
+                    && !modifiers.ctrl
+                    && !modifiers.mac_cmd
+                    && !modifiers.alt
+                    && !modifiers.shift
             }
             Self::Alt(bound) => {
                 key == bound && modifiers.alt && !modifiers.shift && !modifiers.command
@@ -127,6 +146,13 @@ impl AppCommand {
         use Binding::{AltOrShift, Command, CommandShift, Plain};
         let (label, shortcut, binding) = match self {
             New => ("New map", "Cmd/Ctrl+N", Some(Command(Key::N))),
+            NextTab => ("Next map tab", "Ctrl+Tab", Some(Binding::ControlTab(false))),
+            PreviousTab => (
+                "Previous map tab",
+                "Ctrl+Shift+Tab",
+                Some(Binding::ControlTab(true)),
+            ),
+            CloseTab => ("Close map tab", "Cmd/Ctrl+W", Some(Command(Key::W))),
             Open => ("Open map...", "Cmd/Ctrl+O", Some(Command(Key::O))),
             Save => ("Save", "Cmd/Ctrl+S", Some(Command(Key::S))),
             SaveAs => ("Save as...", "Cmd/Ctrl+Shift+S", Some(CommandShift(Key::S))),
@@ -229,6 +255,9 @@ impl AppCommand {
         matches!(
             self,
             Self::New
+                | Self::NextTab
+                | Self::PreviousTab
+                | Self::CloseTab
                 | Self::Open
                 | Self::Save
                 | Self::SaveAs

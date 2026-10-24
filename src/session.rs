@@ -89,6 +89,7 @@ pub struct MapSession {
     pub editor: Editor,
     pub viewport: Viewport,
     pub search: SearchState,
+    pub notes_open: bool,
     pub(crate) pristine_blank: bool,
 }
 
@@ -99,6 +100,7 @@ impl MapSession {
             editor: Editor::new(),
             viewport: Viewport::default(),
             search: SearchState::default(),
+            notes_open: false,
             pristine_blank: true,
         }
     }

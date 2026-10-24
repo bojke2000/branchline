@@ -94,7 +94,7 @@ fn real_ui_renders_and_keeps_auxiliary_typing_out_of_canvas() {
     let mut output = context.run_ui(egui::RawInput::default(), |ui| app.show(ui));
     assert!(!output.shapes.is_empty());
     output.textures_delta.clear();
-    assert_eq!(app.editor.document.nodes.len(), 1);
+    assert_eq!(app.workspace.map().editor.document.nodes.len(), 1);
     let frame = |app: &mut NativeApp, key: Option<egui::Key>, command: bool| {
         let modifiers = egui::Modifiers {
             command,
@@ -117,15 +117,19 @@ fn real_ui_renders_and_keeps_auxiliary_typing_out_of_canvas() {
         output.textures_delta.clear();
     };
     context.memory_mut(|memory| {
-        memory.request_focus(egui::Id::unique(("idea", &app.editor.selected)))
+        memory.request_focus(egui::Id::unique((
+            "idea",
+            app.workspace.active_id(),
+            &app.workspace.map().editor.selected,
+        )))
     });
     frame(&mut app, Some(egui::Key::Tab), false);
     frame(&mut app, None, false);
-    assert_eq!(app.editor.document.nodes.len(), 2);
+    assert_eq!(app.workspace.map().editor.document.nodes.len(), 2);
     frame(&mut app, Some(egui::Key::Enter), false);
-    assert!(app.editor.editing.is_none());
+    assert!(app.workspace.map().editor.editing.is_none());
     assert_eq!(
-        app.editor.document.nodes.len(),
+        app.workspace.map().editor.document.nodes.len(),
         2,
         "Commit must not also create a sibling"
     );
@@ -133,7 +137,7 @@ fn real_ui_renders_and_keeps_auxiliary_typing_out_of_canvas() {
     frame(&mut app, None, false);
     frame(&mut app, Some(egui::Key::Tab), false);
     assert_eq!(
-        app.editor.document.nodes.len(),
+        app.workspace.map().editor.document.nodes.len(),
         2,
         "Search text field owns Tab"
     );
@@ -144,8 +148,18 @@ fn recovery_keeps_uncommitted_inline_text() {
     let temp = tempfile::tempdir().unwrap();
     let store = branchline::storage::RecoveryStore::open(temp.path().into()).unwrap();
     let mut app = NativeApp::new(store).unwrap();
-    app.editor.dispatch(EditorAction::Edit).unwrap();
-    app.editor.editing.as_mut().unwrap().text = "Still typing 研究".into();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::Edit)
+        .unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .editing
+        .as_mut()
+        .unwrap()
+        .text = "Still typing 研究".into();
     app.checkpoint_recovery().unwrap();
     let bytes = std::fs::read(temp.path().join("recovery.json")).unwrap();
     let record: branchline::storage::RecoveryRecord = serde_json::from_slice(&bytes).unwrap();
@@ -154,8 +168,8 @@ fn recovery_keeps_uncommitted_inline_text() {
         "Still typing 研究"
     );
     assert_eq!(
-        app.editor.document.nodes[&app.editor.document.root].text,
+        app.workspace.map().editor.document.nodes[&app.workspace.map().editor.document.root].text,
         "Central idea"
     );
-    assert!(app.editor.editing.is_some());
+    assert!(app.workspace.map().editor.editing.is_some());
 }
