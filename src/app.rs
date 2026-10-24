@@ -64,12 +64,20 @@ pub struct EditBuffer {
     pub text: String,
 }
 
+#[derive(Clone)]
+pub struct DetailsDraft {
+    pub id: NodeId,
+    pub notes: String,
+    pub link: String,
+}
+
 pub struct Editor {
     pub document: Document,
     pub selected: NodeId,
     selection: BTreeSet<NodeId>,
     pub history: History,
     pub editing: Option<EditBuffer>,
+    pub details: Option<DetailsDraft>,
     pub path: Option<PathBuf>,
     pub document_id: String,
     pub pending: Option<PendingAction>,
@@ -97,6 +105,7 @@ impl Editor {
             document,
             history: History::default(),
             editing: None,
+            details: None,
             path: None,
             document_id: Uuid::new_v4().to_string(),
             pending: None,
@@ -110,6 +119,66 @@ impl Editor {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    fn validate_draft_owners(&self) -> Result<(), EditorError> {
+        for id in self
+            .editing
+            .iter()
+            .map(|draft| &draft.id)
+            .chain(self.details.iter().map(|draft| &draft.id))
+        {
+            if !self.document.nodes.contains_key(id) {
+                return Err(EditorError::State(format!(
+                    "Draft owner no longer exists: {id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn has_drafts(&self) -> Result<bool, EditorError> {
+        self.validate_draft_owners()?;
+        Ok(self
+            .editing
+            .as_ref()
+            .is_some_and(|draft| self.document.nodes[&draft.id].text != draft.text)
+            || self.details.as_ref().is_some_and(|draft| {
+                let node = &self.document.nodes[&draft.id];
+                node.notes != draft.notes || node.link != draft.link
+            }))
+    }
+
+    pub fn snapshot_with_drafts(&self) -> Result<Document, EditorError> {
+        self.validate_draft_owners()?;
+        let mut document = self.document.clone();
+        if let Some(draft) = &self.editing {
+            document
+                .nodes
+                .get_mut(&draft.id)
+                .expect("validated owner")
+                .text = draft.text.clone();
+        }
+        if let Some(draft) = &self.details {
+            let node = document.nodes.get_mut(&draft.id).expect("validated owner");
+            node.notes = draft.notes.clone();
+            node.link = draft.link.clone();
+        }
+        document.validate()?;
+        Ok(document)
+    }
+
+    pub fn flush_details(&mut self) -> Result<(), EditorError> {
+        if let Some(draft) = self.details.clone() {
+            self.execute(Command::SetDetails {
+                id: draft.id,
+                notes: draft.notes,
+                link: draft.link,
+            })?;
+            self.details = None;
+            self.draft_revision = self.draft_revision.wrapping_add(1);
+        }
+        Ok(())
     }
 
     pub fn search(&self, query: &str) -> Vec<NodeId> {
@@ -438,6 +507,7 @@ impl Editor {
         self.replace_selection(self.document.root.clone());
         self.history = History::default();
         self.editing = None;
+        self.details = None;
         self.path = path;
         self.pending = None;
         self.staged_import = None;

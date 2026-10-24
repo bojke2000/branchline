@@ -5,5 +5,6 @@ pub mod document;
 mod drag;
 pub mod interchange;
 pub mod layout;
+pub mod session;
 pub mod storage;
 pub mod ui;

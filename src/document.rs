@@ -448,6 +448,12 @@ impl Document {
                 self.node_mut(&id)?.link = link;
                 Ok(None)
             }
+            Command::SetDetails { id, notes, link } => {
+                let node = self.node_mut(&id)?;
+                node.notes = notes;
+                node.link = link;
+                Ok(None)
+            }
             Command::ToggleFold { id } => {
                 let node = self.node_mut(&id)?;
                 node.folded = !node.folded;
@@ -536,6 +542,11 @@ pub enum Command {
     },
     SetLink {
         id: NodeId,
+        link: String,
+    },
+    SetDetails {
+        id: NodeId,
+        notes: String,
         link: String,
     },
     Delete {

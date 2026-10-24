@@ -2,6 +2,7 @@ use branchline::{
     app::{Editor, EditorAction},
     document::Command,
     layout::{Point, Rect, Size},
+    session::Viewport,
     ui::*,
 };
 

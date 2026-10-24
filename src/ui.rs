@@ -1,12 +1,13 @@
 pub use crate::commands::palette_matches;
 use crate::{
-    app::{Editor, EditorAction, EditorError, EditorKey, PendingAction},
+    app::{DetailsDraft, Editor, EditorAction, EditorError, EditorKey, PendingAction},
     appearance,
     commands::{self, AppCommand, FILE_COMMANDS, NAVIGATION_COMMANDS, VIEW_COMMANDS},
     document::{Command, DeletionPlan, Document, MovePlacement, NodeId},
     drag::DragSession,
     interchange::{export_mm, import_mm, read_native},
     layout::{self, Layout, Point, Rect, Size},
+    session::Viewport,
     storage::{RecoveryRecord, RecoveryStore, StorageError, atomic_write, read_bounded},
 };
 use eframe::egui::{self, Color32, FontId, Id, Key, Pos2, Sense, Stroke, Vec2};
@@ -16,58 +17,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-
-#[derive(Clone, Copy)]
-pub struct Viewport {
-    pub pan: Point,
-    pub zoom: f32,
-}
-
-impl Default for Viewport {
-    fn default() -> Self {
-        Self {
-            pan: Point::default(),
-            zoom: 1.0,
-        }
-    }
-}
-
-impl Viewport {
-    pub fn to_screen(self, point: Point, center: Point) -> Point {
-        Point {
-            x: center.x + self.pan.x + point.x * self.zoom,
-            y: center.y + self.pan.y + point.y * self.zoom,
-        }
-    }
-    pub fn to_world(self, point: Point, center: Point) -> Point {
-        Point {
-            x: (point.x - center.x - self.pan.x) / self.zoom,
-            y: (point.y - center.y - self.pan.y) / self.zoom,
-        }
-    }
-    pub fn zoom_at(&mut self, pointer: Point, center: Point, factor: f32) {
-        let world = self.to_world(pointer, center);
-        self.zoom = (self.zoom * factor).clamp(0.05, 3.0);
-        self.pan = Point {
-            x: pointer.x - center.x - world.x * self.zoom,
-            y: pointer.y - center.y - world.y * self.zoom,
-        };
-    }
-    pub fn fit(&mut self, bounds: Rect, available: Size) {
-        let width = (bounds.max.x - bounds.min.x).max(1.0);
-        let height = (bounds.max.y - bounds.min.y).max(1.0);
-        self.zoom = ((available.width - 80.0).max(1.0) / width)
-            .min((available.height - 80.0).max(1.0) / height)
-            .clamp(0.01, 1.2);
-        self.focus(bounds.center());
-    }
-    pub fn focus(&mut self, point: Point) {
-        self.pan = Point {
-            x: -point.x * self.zoom,
-            y: -point.y * self.zoom,
-        };
-    }
-}
 
 enum CanvasDrag {
     Pan { origin: Point, initial_pan: Point },
@@ -83,13 +32,6 @@ enum Dialog {
         path: PathBuf,
         export: Option<Vec<u8>>,
     },
-}
-
-#[derive(Clone)]
-struct Details {
-    id: NodeId,
-    notes: String,
-    link: String,
 }
 
 pub struct NativeApp {
@@ -109,7 +51,6 @@ pub struct NativeApp {
     focus_selected: bool,
     fit_requested: bool,
     notes_open: bool,
-    details: Option<Details>,
     search_open: bool,
     search_query: String,
     search_focus: bool,
@@ -146,7 +87,6 @@ impl NativeApp {
             focus_selected: false,
             fit_requested: false,
             notes_open: false,
-            details: None,
             search_open: false,
             search_query: String::new(),
             search_focus: false,
@@ -169,53 +109,11 @@ impl NativeApp {
         }
     }
 
-    fn flush_details(&mut self) -> Result<(), EditorError> {
-        if let Some(details) = self.details.clone() {
-            if self.editor.document.nodes.contains_key(&details.id) {
-                self.editor.execute(Command::SetNotes {
-                    id: details.id.clone(),
-                    notes: details.notes,
-                })?;
-                self.editor.execute(Command::SetLink {
-                    id: details.id,
-                    link: details.link,
-                })?;
-            }
-            self.details = None;
-        }
-        Ok(())
-    }
-
-    fn has_drafts(&self) -> bool {
-        self.editor
-            .editing
-            .as_ref()
-            .is_some_and(|buffer| self.editor.document.nodes[&buffer.id].text != buffer.text)
-            || self.details.as_ref().is_some_and(|details| {
-                self.editor
-                    .document
-                    .nodes
-                    .get(&details.id)
-                    .is_some_and(|node| node.notes != details.notes || node.link != details.link)
-            })
-    }
-
     pub fn checkpoint_recovery(&mut self) -> Result<(), EditorError> {
-        if !self.editor.is_dirty() && !self.has_drafts() {
+        if !self.editor.is_dirty() && !self.editor.has_drafts()? {
             return self.clear_recovery();
         }
-        let mut document = self.editor.document.clone();
-        if let Some(buffer) = &self.editor.editing
-            && let Some(node) = document.nodes.get_mut(&buffer.id)
-        {
-            node.text = buffer.text.clone();
-        }
-        if let Some(details) = &self.details
-            && let Some(node) = document.nodes.get_mut(&details.id)
-        {
-            node.notes = details.notes.clone();
-            node.link = details.link.clone();
-        }
+        let document = self.editor.snapshot_with_drafts()?;
         let record = RecoveryRecord {
             version: 1,
             document_id: self.editor.document_id.clone(),
@@ -227,12 +125,12 @@ impl NativeApp {
     }
 
     fn prepare(&mut self) -> Result<(), EditorError> {
-        self.flush_details()?;
+        self.editor.flush_details()?;
         self.editor.commit_edit()
     }
 
     fn action(&mut self, action: EditorAction) {
-        let result = self.flush_details().and_then(|_| {
+        let result = self.editor.flush_details().and_then(|_| {
             if matches!(action, EditorAction::Delete) {
                 let ids = self.editor.selection().iter().cloned().collect::<Vec<_>>();
                 let plan = self.editor.document.plan_deletion(&ids)?;
@@ -264,7 +162,7 @@ impl NativeApp {
             AppCommand::Palette => self.open_palette(),
             AppCommand::Notes => {
                 if self.notes_open {
-                    let result = self.flush_details();
+                    let result = self.editor.flush_details();
                     if let Err(error) = result {
                         self.report(Err(error));
                         return;
@@ -478,7 +376,7 @@ impl NativeApp {
     fn reset_view(&mut self) {
         self.viewport = Viewport::default();
         self.layout_revision = None;
-        self.details = None;
+        self.editor.details = None;
         self.recovery_revision = None;
         self.fit_requested = true;
         self.drag = None;
@@ -806,14 +704,17 @@ impl NativeApp {
 
     fn details_panel(&mut self, ui: &mut egui::Ui) {
         if self
+            .editor
             .details
             .as_ref()
             .is_none_or(|details| details.id != self.editor.selected)
         {
-            let result = self.flush_details();
-            self.report(result);
+            if let Err(error) = self.editor.flush_details() {
+                self.report(Err(error));
+                return;
+            }
             let node = &self.editor.document.nodes[&self.editor.selected];
-            self.details = Some(Details {
+            self.editor.details = Some(DetailsDraft {
                 id: node.id.clone(),
                 notes: node.notes.clone(),
                 link: node.link.clone(),
@@ -825,7 +726,7 @@ impl NativeApp {
             ui.heading("A little more context");
             ui.weak("Notes for the selected idea");
             ui.add_space(12.0);
-            if let Some(details) = &mut self.details {
+            if let Some(details) = &mut self.editor.details {
                 let response = ui.add(egui::TextEdit::multiline(&mut details.notes).desired_width(f32::INFINITY).desired_rows(14).hint_text("Capture details here...").char_limit(262_144));
                 if response.changed() { self.recovery_revision = None; self.last_change = Instant::now(); }
                 commit |= response.lost_focus();
@@ -846,7 +747,7 @@ impl NativeApp {
             }
         });
         if commit {
-            let result = self.flush_details();
+            let result = self.editor.flush_details();
             self.report(result);
         }
     }
@@ -895,6 +796,7 @@ impl NativeApp {
         });
         if let Some(id) = selected {
             let result = self
+                .editor
                 .flush_details()
                 .and_then(|_| self.editor.reveal_selection(&id));
             self.report(result);
@@ -1004,6 +906,7 @@ impl NativeApp {
             })
         {
             let result = self
+                .editor
                 .flush_details()
                 .and_then(|_| self.editor.begin_replacement());
             if result.is_ok() {
@@ -1380,7 +1283,7 @@ impl NativeApp {
             self.focus_selected = true;
         }
         if let Some((id, toggle, preserve)) = clicked {
-            let result = self.flush_details().and_then(|_| {
+            let result = self.editor.flush_details().and_then(|_| {
                 if toggle {
                     self.editor.toggle_selection(&id)
                 } else if preserve {
