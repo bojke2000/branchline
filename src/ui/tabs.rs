@@ -143,6 +143,7 @@ impl NativeApp {
     }
 
     pub(super) fn reset_tab_renderer(&mut self, ctx: &egui::Context) {
+        self.clipboard_gesture = None;
         ctx.memory_mut(|memory| {
             if let Some(id) = memory.focused() {
                 memory.surrender_focus(id);

@@ -16,6 +16,7 @@ pub use lifecycle::{CloseDecision, TransitionProgress};
 #[error("{0}")]
 pub struct WorkspaceError(pub String);
 
+#[derive(Clone, Debug)]
 pub enum PasteTarget {
     Append {
         session: SessionId,

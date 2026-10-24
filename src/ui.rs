@@ -28,6 +28,8 @@ enum CanvasDrag {
 
 enum Dialog {
     CloseDecision(SessionId),
+    Paste(paste::PendingPaste),
+    CopyOutline(crate::outline_format::OutlineCopy),
     Recovery,
     Import,
     Delete(DeletionPlan),
@@ -39,6 +41,7 @@ enum Dialog {
 }
 
 mod details;
+mod paste;
 mod recovery;
 mod tabs;
 mod workspace_dialogs;
@@ -72,10 +75,19 @@ pub struct NativeApp {
     pending_close: Option<SessionId>,
     pending_quit: bool,
     pending_import: Option<ImportReport>,
+    clipboard: Box<dyn crate::clipboard::OutlineClipboard>,
+    clipboard_gesture: Option<paste::ClipboardGesture>,
 }
 
 impl NativeApp {
-    pub fn new(mut store: RecoveryCoordinator) -> Result<Self, StorageError> {
+    pub fn new(store: RecoveryCoordinator) -> Result<Self, StorageError> {
+        Self::with_clipboard(store, Box::<crate::clipboard::NativeClipboard>::default())
+    }
+
+    pub fn with_clipboard(
+        mut store: RecoveryCoordinator,
+        clipboard: Box<dyn crate::clipboard::OutlineClipboard>,
+    ) -> Result<Self, StorageError> {
         let restore = store.load()?;
         let recovery_pending = restore.has_recovery();
         let notices = restore.warnings.join("\n");
@@ -115,6 +127,8 @@ impl NativeApp {
             pending_close: None,
             pending_quit: false,
             pending_import: None,
+            clipboard,
+            clipboard_gesture: None,
         })
     }
 
@@ -202,6 +216,13 @@ impl NativeApp {
             return;
         }
         match command {
+            AppCommand::Copy => self.copy_outline(),
+            AppCommand::Paste => {
+                self.begin_paste(false, None);
+            }
+            AppCommand::PasteAsNewMap => {
+                self.begin_paste(true, None);
+            }
             AppCommand::SelectAll => {
                 let result = self.edit(EditorEdit::SelectAll);
                 self.report(result);
@@ -372,7 +393,17 @@ impl NativeApp {
                 .or(chosen);
         });
         chosen = self
-            .menu_commands(ui, &[AppCommand::SelectAll, AppCommand::Delete], target)
+            .menu_commands(
+                ui,
+                &[
+                    AppCommand::SelectAll,
+                    AppCommand::Copy,
+                    AppCommand::Paste,
+                    AppCommand::PasteAsNewMap,
+                    AppCommand::Delete,
+                ],
+                target,
+            )
             .or(chosen);
         ui.separator();
         chosen = self
@@ -616,6 +647,20 @@ impl NativeApp {
             )
             .show(root_ui, |ui| self.toolbar(ui, blocked));
         self.tab_strip(root_ui, blocked);
+        if self.dialog.is_some() {
+            ctx.input_mut(|input| {
+                input.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Text(_)
+                            | egui::Event::Paste(_)
+                            | egui::Event::Copy
+                            | egui::Event::Cut
+                            | egui::Event::Ime(_)
+                    )
+                })
+            });
+        }
         egui::Panel::bottom("status").show(root_ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -673,6 +718,7 @@ impl NativeApp {
         if self.workspace.active().is_err() {
             ctx.request_repaint();
             self.finish_tab_transition(&ctx);
+            self.clipboard_gesture = None;
             return;
         }
         if self.help_open {
@@ -751,6 +797,13 @@ impl NativeApp {
             title
         )));
         self.finish_tab_transition(&ctx);
+        if self
+            .clipboard_gesture
+            .as_ref()
+            .is_some_and(|gesture| !ctx.input(|input| input.key_down(gesture.key)))
+        {
+            self.clipboard_gesture = None;
+        }
     }
 
     fn open_palette(&mut self) {
@@ -778,7 +831,8 @@ impl NativeApp {
         egui::Panel::top("search").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Find an idea");
-                let response = ui.add(
+                let response = ui.add_enabled(
+                    self.dialog.is_none(),
                     egui::TextEdit::singleline(&mut self.workspace.map_mut().search.query)
                         .id(Id::unique(("search", session)))
                         .hint_text("Search text and notes")
@@ -894,6 +948,27 @@ impl NativeApp {
         let focused = ctx.memory(|memory| memory.focused());
         if self.composing.is_some() && self.composing != focused {
             self.composing = None;
+        }
+        let paste_bytes = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Paste(text) => Some(text.len()),
+                    _ => None,
+                })
+                .fold(0usize, usize::saturating_add)
+        });
+        if paste_bytes > crate::document::MAX_FILE_BYTES {
+            self.error = Some(
+                "Backend clipboard paste exceeds 32 MiB; no text or outline was inserted.".into(),
+            );
+            ctx.input_mut(|input| {
+                input
+                    .events
+                    .retain(|event| !matches!(event, egui::Event::Paste(_)))
+            });
+            return;
         }
         let events = ctx.input(|input| input.events.clone());
         if self.input_after_switch {
@@ -1017,6 +1092,9 @@ impl NativeApp {
             return;
         }
         if !map_owns_input {
+            return;
+        }
+        if self.clipboard_shortcut(ctx, bound, &events) {
             return;
         }
         if let Some((keycode, command)) = bound {
@@ -1690,13 +1768,15 @@ impl NativeApp {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = self.dialog.take() else {
+        let Some(mut dialog) = self.dialog.take() else {
             return;
         };
         let mut keep = true;
         egui::Modal::new(Id::unique("file-dialog")).show(ctx, |ui| {
             ui.set_width(470.0);
-            match &dialog {
+            match &mut dialog {
+                Dialog::Paste(pending) => { keep = self.paste_dialog(ui, pending); }
+                Dialog::CopyOutline(copy) => { keep = self.copy_dialog(ui, copy); }
                 Dialog::CloseDecision(id) => {
                     ui.heading("Keep these ideas?");
                     let title = self.workspace.order().iter().position(|candidate| candidate == id)

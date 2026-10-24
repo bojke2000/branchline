@@ -4,6 +4,9 @@ use eframe::egui::{Key, Modifiers};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppCommand {
     SelectAll,
+    Copy,
+    Paste,
+    PasteAsNewMap,
     New,
     NextTab,
     PreviousTab,
@@ -43,6 +46,9 @@ pub enum AppCommand {
 
 pub const EDIT_COMMANDS: &[AppCommand] = &[
     AppCommand::SelectAll,
+    AppCommand::Copy,
+    AppCommand::Paste,
+    AppCommand::PasteAsNewMap,
     AppCommand::AddChild,
     AppCommand::AddSibling,
     AppCommand::Edit,
@@ -89,6 +95,7 @@ pub const VIEW_COMMANDS: &[AppCommand] = &[
 #[derive(Clone, Copy)]
 enum Binding {
     ControlOrCommand(Key),
+    ControlOrCommandShift(Key),
     Plain(Key),
     Alt(Key),
     AltOrShift(Key),
@@ -101,6 +108,12 @@ enum Binding {
 impl Binding {
     fn matches(self, key: Key, modifiers: Modifiers) -> bool {
         match self {
+            Self::ControlOrCommandShift(bound) => {
+                key == bound
+                    && (modifiers.ctrl || modifiers.command || modifiers.mac_cmd)
+                    && modifiers.shift
+                    && !modifiers.alt
+            }
             Self::ControlOrCommand(bound) => {
                 key == bound
                     && (modifiers.ctrl || modifiers.command || modifiers.mac_cmd)
@@ -154,6 +167,21 @@ impl AppCommand {
         use AppCommand::*;
         use Binding::{AltOrShift, Command, CommandShift, Plain};
         let (label, shortcut, binding) = match self {
+            Copy => (
+                "Copy outline",
+                "Cmd/Ctrl+C",
+                Some(Binding::ControlOrCommand(Key::C)),
+            ),
+            Paste => (
+                "Paste outline",
+                "Cmd/Ctrl+V",
+                Some(Binding::ControlOrCommand(Key::V)),
+            ),
+            PasteAsNewMap => (
+                "Paste as new map",
+                "Cmd/Ctrl+Shift+V",
+                Some(Binding::ControlOrCommandShift(Key::V)),
+            ),
             SelectAll => (
                 "Select all ideas",
                 "Cmd/Ctrl+A",

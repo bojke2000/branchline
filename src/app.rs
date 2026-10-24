@@ -327,8 +327,28 @@ impl Editor {
                 candidate.execute(command)?;
             }
             EditorEdit::Action(action) => {
-                candidate.flush_details()?;
+                if matches!(action, EditorAction::Undo | EditorAction::Redo) {
+                    let unchanged_details = candidate.details.as_ref().is_some_and(|draft| {
+                        candidate.document.nodes.get(&draft.id).is_some_and(|node| {
+                            node.notes == draft.notes && node.link == draft.link
+                        })
+                    });
+                    if unchanged_details {
+                        candidate.details = None;
+                        candidate.draft_revision = candidate.draft_revision.wrapping_add(1);
+                    }
+                } else {
+                    candidate.flush_details()?;
+                }
                 candidate.dispatch(*action)?;
+                if matches!(action, EditorAction::Undo | EditorAction::Redo)
+                    && candidate
+                        .details
+                        .as_ref()
+                        .is_some_and(|draft| !candidate.document.nodes.contains_key(&draft.id))
+                {
+                    return Err(EditorError::State("Undo/redo would remove an unfinished notes edit's owner. Finish that edit before changing this history step.".into()));
+                }
             }
             EditorEdit::Key(key) => {
                 candidate.handle_key(*key, false, false)?;

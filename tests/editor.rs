@@ -86,6 +86,54 @@ fn whole_map_delete_retains_root_and_one_undo_restores_hidden_nodes() {
 }
 
 #[test]
+fn map_undo_releases_unchanged_details_but_does_not_discard_an_unfinished_owner() {
+    use branchline::workspace::Workspace;
+    let mut workspace = Workspace::new();
+    let id = workspace.active_id();
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::AddChild))
+        .unwrap();
+    workspace.apply(id, EditorEdit::CommitDrafts).unwrap();
+    let child = workspace.map().editor.selected.clone();
+    workspace
+        .apply(id, EditorEdit::BeginDetails(child.clone()))
+        .unwrap();
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::Undo))
+        .unwrap();
+    assert_eq!(workspace.map().editor.document.nodes.len(), 1);
+    assert!(workspace.map().editor.details.is_none());
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::Redo))
+        .unwrap();
+    workspace
+        .apply(id, EditorEdit::BeginDetails(child.clone()))
+        .unwrap();
+    workspace
+        .apply(
+            id,
+            EditorEdit::SetDraft {
+                field: DraftField::Notes(child),
+                text: "Unfinished".into(),
+            },
+        )
+        .unwrap();
+    let before = workspace.map().editor.document.clone();
+    let generation = workspace.map().editor.history.generation;
+    assert!(
+        workspace
+            .apply(id, EditorEdit::Action(EditorAction::Undo))
+            .is_err()
+    );
+    assert_eq!(workspace.map().editor.document, before);
+    assert_eq!(workspace.map().editor.history.generation, generation);
+    assert_eq!(
+        workspace.map().editor.details.as_ref().unwrap().notes,
+        "Unfinished"
+    );
+}
+
+#[test]
 fn edit_modes_route_keys() {
     let mut editor = Editor::new();
     let root = editor.selected.clone();
