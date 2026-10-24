@@ -546,7 +546,7 @@ fn successful_quit_does_not_republish_discarded_drafts_during_final_frame() {
 }
 
 #[test]
-fn canceling_overwrite_during_quit_keeps_the_original_draft() {
+fn saving_during_quit_updates_the_same_file_without_replacement_confirmation() {
     let temp = tempfile::tempdir().unwrap();
     let mut app =
         NativeApp::new(RecoveryCoordinator::open(temp.path().join("recovery")).unwrap()).unwrap();
@@ -554,24 +554,69 @@ fn canceling_overwrite_during_quit_keeps_the_original_draft() {
     app.workspace
         .save(app.workspace.active_id(), &path)
         .unwrap();
-    let original = std::fs::read(&path).unwrap();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     key(&mut app, &ctx, Key::F2, Modifiers::NONE);
     render(
         &mut app,
         &ctx,
-        vec![Event::Text("Keep canceled save draft".into())],
+        vec![Event::Text("Saved without another prompt".into())],
     );
     key(&mut app, &ctx, Key::Q, command());
     click_label(&mut app, &ctx, "Save");
-    click_label(&mut app, &ctx, "Cancel");
     assert!(!app.workspace.transition_pending());
-    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let saved = branchline::interchange::read_native(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved.nodes[&saved.root].text,
+        "Saved without another prompt"
+    );
+    assert!(app.workspace.map().editor.editing.is_none());
+    assert!(!app.workspace.map().editor.is_dirty());
+}
+
+#[test]
+fn ordinary_save_updates_its_file_without_a_replace_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app =
+        NativeApp::new(RecoveryCoordinator::open(temp.path().join("recovery")).unwrap()).unwrap();
+    let path = temp.path().join("saved.branchline");
+    app.workspace
+        .save(app.workspace.active_id(), &path)
+        .unwrap();
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    key(&mut app, &ctx, Key::F2, Modifiers::NONE);
+    render(&mut app, &ctx, vec![Event::Text("Updated directly".into())]);
+    key(&mut app, &ctx, Key::S, command());
+    let saved = branchline::interchange::read_native(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved.nodes[&saved.root].text, "Updated directly");
+    assert_eq!(app.workspace.map().editor.path.as_ref(), Some(&path));
+    assert!(!app.workspace.map().editor.is_dirty());
+    assert!(app.workspace.map().editor.editing.is_none());
+}
+
+#[test]
+fn ordinary_save_still_rejects_an_externally_replaced_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app =
+        NativeApp::new(RecoveryCoordinator::open(temp.path().join("recovery")).unwrap()).unwrap();
+    let path = temp.path().join("saved.branchline");
+    app.workspace
+        .save(app.workspace.active_id(), &path)
+        .unwrap();
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    key(&mut app, &ctx, Key::F2, Modifiers::NONE);
+    render(&mut app, &ctx, vec![Event::Text("Retained draft".into())]);
+    std::fs::rename(&path, temp.path().join("original.branchline")).unwrap();
+    std::fs::write(&path, b"foreign replacement").unwrap();
+    key(&mut app, &ctx, Key::S, command());
+    assert_eq!(std::fs::read(&path).unwrap(), b"foreign replacement");
     assert_eq!(
         app.workspace.map().editor.editing.as_ref().unwrap().text,
-        "Keep canceled save draft"
+        "Retained draft"
     );
+    assert!(app.workspace.map().editor.has_drafts().unwrap());
 }
 
 #[test]

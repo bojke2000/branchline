@@ -147,6 +147,8 @@ Native `.branchline` files are versioned JSON. The existing extension, internal
 application identifier and recovery location are retained for compatibility
 with earlier Branchline builds; the visible product and app bundle are BMM.
 The source directory and Cargo executable remain named `branchline`.
+Ordinary Save updates the current native file without a replacement prompt;
+externally replaced files still produce a conflict rather than being overwritten.
 Saves use a flushed temporary
 sibling and atomic replacement. Save As and export explicitly confirm existing
 destinations. New and Open add independent tabs without replacing an existing
@@ -274,7 +276,7 @@ on Escape, outside release or an intervening unsaved-changes dialog.
 
 Executed on this Mac: `cargo fmt --check` passed;
 `cargo clippy --all-targets -- -D warnings` passed;
-`cargo test --locked` passed (149 tests; one optional parser test ignored);
+`cargo test --locked` passed (151 tests; one optional parser test ignored);
 `cargo build --release --locked` and `sh scripts/bundle.sh` passed.
 These results do not establish the unverified native scenarios listed below.
 

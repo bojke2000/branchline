@@ -506,7 +506,8 @@ impl NativeApp {
                 return;
             }
         };
-        let path = if save_as || selected.is_none() {
+        let choosing_destination = save_as || selected.is_none();
+        let path = if choosing_destination {
             rfd::FileDialog::new()
                 .add_filter("BMM mind map", &["branchline"])
                 .set_file_name("Ideas.branchline")
@@ -515,7 +516,7 @@ impl NativeApp {
             selected
         };
         if let Some(path) = path {
-            if path.exists() {
+            if choosing_destination && path.exists() {
                 self.dialog = Some(Dialog::Overwrite {
                     session,
                     path,
