@@ -88,7 +88,7 @@ fn zoom_preserves_anchor_and_fit_contains_bounds() {
 fn real_ui_renders_and_keeps_auxiliary_typing_out_of_canvas() {
     use eframe::egui;
     let temp = tempfile::tempdir().unwrap();
-    let store = branchline::storage::RecoveryStore::open(temp.path().into()).unwrap();
+    let store = branchline::recovery::RecoveryCoordinator::open(temp.path().into()).unwrap();
     let mut app = NativeApp::new(store).unwrap();
     let context = egui::Context::default();
     let mut output = context.run_ui(egui::RawInput::default(), |ui| app.show(ui));
@@ -146,7 +146,7 @@ fn real_ui_renders_and_keeps_auxiliary_typing_out_of_canvas() {
 #[test]
 fn recovery_keeps_uncommitted_inline_text() {
     let temp = tempfile::tempdir().unwrap();
-    let store = branchline::storage::RecoveryStore::open(temp.path().into()).unwrap();
+    let store = branchline::recovery::RecoveryCoordinator::open(temp.path().into()).unwrap();
     let mut app = NativeApp::new(store).unwrap();
     app.workspace
         .map_mut()

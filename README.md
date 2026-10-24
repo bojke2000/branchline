@@ -106,6 +106,13 @@ Saves use a flushed temporary
 sibling and atomic replacement. Save As and export explicitly confirm existing
 destinations. New and Open add independent tabs without replacing an existing
 map or committing its unfinished text. Failed/cancelled saves retain that work.
+Cmd/Ctrl+W closes the targeted tab; Ctrl+Tab / Ctrl+Shift+Tab cycle tabs.
+Closing a dirty tab offers Save / Discard / Cancel. Quit asks about dirty maps
+in tab order without removing them: canceling a later prompt keeps every tab,
+including earlier pending discards, while successful earlier saves stay saved.
+Recovery/session decisions are published before a tab is removed or the window
+closes. A failed saved tab offers Retry / Locate / Close rather than a fabricated
+empty map. Closing the final tab creates a fresh blank map.
 
 Recovery tracks each tab independently with a 700 ms idle delay, including
 unfinished inline text and notes without committing them to undo history.

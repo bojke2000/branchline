@@ -1,4 +1,4 @@
-use branchline::{app::EditorAction, storage::RecoveryStore, ui::NativeApp};
+use branchline::{app::EditorAction, recovery::RecoveryCoordinator, ui::NativeApp};
 use eframe::egui::{self, Color32, Pos2, Shape};
 
 fn render(app: &mut NativeApp, ctx: &egui::Context, events: Vec<egui::Event>) -> Vec<Shape> {
@@ -79,7 +79,7 @@ fn click_with_modifiers(
 #[test]
 fn bmm_defaults_to_dark_mode_even_on_a_light_host() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     let ctx = egui::Context::default();
     ctx.set_theme(egui::Theme::Light);
     render(&mut app, &ctx, vec![]);
@@ -121,7 +121,7 @@ fn bmm_defaults_to_dark_mode_even_on_a_light_host() {
 #[test]
 fn dragging_the_selected_root_translates_the_entire_map_without_editing_it() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     for label in ["Pan right branch", "Pan left branch"] {
         let root = app.workspace.map().editor.document.root.clone();
         app.workspace.map_mut().editor.select(&root).unwrap();
@@ -181,7 +181,7 @@ fn dragging_the_selected_root_translates_the_entire_map_without_editing_it() {
 #[test]
 fn root_panning_survives_leaving_the_canvas_and_escape_restores_the_view() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let shapes = render(&mut app, &ctx, vec![]);
@@ -214,7 +214,7 @@ fn root_panning_survives_leaving_the_canvas_and_escape_restores_the_view() {
 #[test]
 fn alt_shift_arrows_pan_without_reparenting_and_stay_local_in_text_fields() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -289,7 +289,7 @@ fn alt_shift_arrows_pan_without_reparenting_and_stay_local_in_text_fields() {
 #[test]
 fn typing_replaces_the_active_label_once_with_cancel_commit_and_undo() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     let before = app.workspace.map().editor.document.clone();
     let generation = app.workspace.map().editor.history.generation;
     let ctx = egui::Context::default();
@@ -383,7 +383,7 @@ fn typing_replaces_the_active_label_once_with_cancel_commit_and_undo() {
 #[test]
 fn typing_stays_in_search_then_replaces_only_the_active_multiselected_node() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -465,7 +465,7 @@ fn typing_stays_in_search_then_replaces_only_the_active_multiselected_node() {
 #[test]
 fn ime_composition_can_start_a_replacement_without_committing_the_old_label() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     let before = app.workspace.map().editor.document.clone();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
@@ -529,7 +529,7 @@ fn ime_composition_can_start_a_replacement_without_committing_the_old_label() {
 #[test]
 fn branch_underlines_share_their_root_branch_color() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -586,7 +586,7 @@ fn branch_underlines_share_their_root_branch_color() {
 #[test]
 fn right_click_targets_that_node_and_executes_the_shared_creation_command() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -641,7 +641,7 @@ fn right_click_targets_that_node_and_executes_the_shared_creation_command() {
 #[test]
 fn shift_arrows_reorder_siblings_but_not_text_editing() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -706,7 +706,7 @@ fn shift_arrows_reorder_siblings_but_not_text_editing() {
 #[test]
 fn shift_click_batch_delete_retains_root_and_undoes_as_one_operation() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -827,7 +827,7 @@ fn release_drag(app: &mut NativeApp, ctx: &egui::Context, to: Pos2) {
 #[test]
 fn dragging_previews_without_mutation_then_moves_and_undoes_a_subtree() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -891,7 +891,7 @@ fn dragging_previews_without_mutation_then_moves_and_undoes_a_subtree() {
 #[test]
 fn drag_reordering_can_be_cancelled_and_cycles_are_rejected() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -995,7 +995,7 @@ fn drag_reordering_can_be_cancelled_and_cycles_are_rejected() {
 #[test]
 fn dragging_a_top_level_branch_across_the_root_changes_its_side() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -1030,7 +1030,7 @@ fn dragging_a_top_level_branch_across_the_root_changes_its_side() {
 #[test]
 fn releasing_outside_the_canvas_cancels_without_leaking_drag_state() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -1068,7 +1068,7 @@ fn releasing_outside_the_canvas_cancels_without_leaking_drag_state() {
 #[test]
 fn right_click_preserves_a_multi_selection_and_cancel_keeps_the_map() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -1134,7 +1134,7 @@ fn right_click_preserves_a_multi_selection_and_cancel_keeps_the_map() {
 #[test]
 fn reordering_root_branches_does_not_recolor_them() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor
@@ -1188,7 +1188,7 @@ fn reordering_root_branches_does_not_recolor_them() {
 #[test]
 fn opening_an_unsaved_dialog_cancels_a_drag_before_pointer_release() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     app.workspace
         .map_mut()
         .editor

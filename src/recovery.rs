@@ -4,8 +4,8 @@ use crate::{
     interchange::{read_native, write_native},
     session::{MapSession, SessionId},
     storage::{
-        RecoveryRecord, RecoveryStore, StorageError, atomic_write_opened, read_bounded,
-        read_opened_bounded, serialize_bounded, serialized_size_bounded,
+        RecoveryLock, StorageError, atomic_write_opened, read_bounded, read_opened_bounded,
+        serialize_bounded, serialized_size_bounded,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,15 @@ pub(crate) fn editor_manifest_bound(editor: &crate::app::Editor) -> usize {
                 .map_or(0, |path| path.as_os_str().len().saturating_mul(6)),
         )
         .saturating_add(editor.document_id.len().saturating_mul(6))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyRecoveryRecord {
+    pub version: u32,
+    pub document_id: String,
+    pub original_path: Option<PathBuf>,
+    pub document: Document,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,12 +201,22 @@ impl WorkspaceManifest {
 
 pub enum RecoverySession<'a> {
     Map(&'a MapSession),
+    SavedMap(&'a MapSession),
     Failed {
         id: SessionId,
         path: &'a Option<PathBuf>,
         reason: &'a str,
         retain_snapshot: bool,
     },
+}
+
+impl RecoverySession<'_> {
+    pub fn id(&self) -> SessionId {
+        match self {
+            Self::Map(map) | Self::SavedMap(map) => map.id(),
+            Self::Failed { id, .. } => *id,
+        }
+    }
 }
 
 pub struct WorkspaceRecoveryState<'a> {
@@ -276,7 +295,7 @@ impl Observation {
 }
 
 pub struct RecoveryCoordinator {
-    store: RecoveryStore,
+    store: RecoveryLock,
     committed: Option<(WorkspaceManifest, FileIdentity, Vec<u8>)>,
     pending_owned: Vec<SnapshotRef>,
     pending_snapshots: BTreeMap<SessionId, (Revision, SnapshotRef)>,
@@ -286,10 +305,10 @@ pub struct RecoveryCoordinator {
     last_attempt: Option<Instant>,
 }
 
-impl From<RecoveryStore> for RecoveryCoordinator {
-    fn from(store: RecoveryStore) -> Self {
-        Self {
-            store,
+impl RecoveryCoordinator {
+    pub fn open(directory: PathBuf) -> Result<Self, StorageError> {
+        Ok(Self {
+            store: RecoveryLock::open(directory)?,
             committed: None,
             pending_owned: vec![],
             pending_snapshots: BTreeMap::new(),
@@ -297,13 +316,7 @@ impl From<RecoveryStore> for RecoveryCoordinator {
             observed: BTreeMap::new(),
             published_observed: BTreeMap::new(),
             last_attempt: None,
-        }
-    }
-}
-
-impl RecoveryCoordinator {
-    pub fn open(directory: PathBuf) -> Result<Self, StorageError> {
-        Ok(RecoveryStore::open(directory)?.into())
+        })
     }
 
     fn path(&self) -> PathBuf {
@@ -409,33 +422,50 @@ impl RecoveryCoordinator {
         }
         let mut retained_bytes = 0usize;
         for tab in manifest.tabs {
-            let content = if let Some(snapshot) = &tab.snapshot {
-                let path = snapshot.path(self.store.directory());
-                match snapshot
-                    .owner
-                    .open_verified(&path)
-                    .and_then(|file| read_opened_bounded(&path, &file))
-                    .and_then(|bytes| read_native(&bytes).map_err(error))
-                {
-                    Ok(document) => {
-                        let bytes = document.estimated_bytes();
-                        if retained_bytes.saturating_add(bytes) > 256 * 1024 * 1024 {
-                            RestoreContent::Failed("Recovery document storage exceeds workspace capacity; this snapshot was retained on disk.".into())
-                        } else {
-                            retained_bytes += bytes;
-                            RestoreContent::Recovered(document)
-                        }
-                    }
-                    Err(cause) => RestoreContent::Failed(format!("{}: {cause}", path.display())),
+            let mut session = self.restore_tab(tab);
+            if let RestoreContent::Recovered(document) = &session.content {
+                let bytes = document.estimated_bytes();
+                if retained_bytes.saturating_add(bytes) > 256 * 1024 * 1024 {
+                    session.content = RestoreContent::Failed("Recovery document storage exceeds workspace capacity; this snapshot was retained on disk.".into());
+                } else {
+                    retained_bytes += bytes;
                 }
-            } else if let Some(reason) = &tab.failure {
-                RestoreContent::Failed(reason.clone())
-            } else {
-                RestoreContent::Saved
-            };
-            restore.sessions.push(RestoredSession { tab, content });
+            }
+            restore.sessions.push(session);
         }
         Ok(restore)
+    }
+
+    fn restore_tab(&self, tab: RecoveryTab) -> RestoredSession {
+        let content = if let Some(snapshot) = &tab.snapshot {
+            let path = snapshot.path(self.store.directory());
+            match snapshot
+                .owner
+                .open_verified(&path)
+                .and_then(|file| read_opened_bounded(&path, &file))
+                .and_then(|bytes| read_native(&bytes).map_err(error))
+            {
+                Ok(document) => RestoreContent::Recovered(document),
+                Err(cause) => RestoreContent::Failed(format!("{}: {cause}", path.display())),
+            }
+        } else if tab.saved_path.is_some() {
+            RestoreContent::Saved
+        } else if let Some(reason) = &tab.failure {
+            RestoreContent::Failed(reason.clone())
+        } else {
+            RestoreContent::Saved
+        };
+        RestoredSession { tab, content }
+    }
+
+    pub fn retry_session(&mut self, id: SessionId) -> Result<RestoredSession, StorageError> {
+        let manifest = self.read_manifest()?;
+        let tab = manifest
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id)
+            .ok_or_else(|| error("The failed tab has no committed restore source."))?;
+        Ok(self.restore_tab(tab))
     }
 
     fn migrate_legacy(&mut self) -> Result<(), StorageError> {
@@ -450,8 +480,11 @@ impl RecoveryCoordinator {
         }
         let opened = read_identified(&source)?;
         let original = &opened.bytes;
-        let record: RecoveryRecord = serde_json::from_slice(original).map_err(error)?;
-        RecoveryStore::validate(&record)?;
+        let record: LegacyRecoveryRecord = serde_json::from_slice(original).map_err(error)?;
+        if record.version != 1 || Uuid::parse_str(&record.document_id).is_err() {
+            return Err(error("Unsupported or malformed legacy recovery identity."));
+        }
+        record.document.validate().map_err(error)?;
         let backup = self.store.directory().join("recovery-v1.backup.json");
         match fs::symlink_metadata(&backup) {
             Ok(metadata) if metadata.is_file() => {
@@ -508,10 +541,16 @@ impl RecoveryCoordinator {
         state: &WorkspaceRecoveryState<'_>,
     ) -> Result<Publication, StorageError> {
         let previous = self.read_manifest()?;
-        if self.committed.is_none() && self.store.load()?.is_some() {
-            return Err(error(
-                "Resolve legacy recovery before publishing another workspace.",
-            ));
+        if self.committed.is_none() {
+            match fs::symlink_metadata(self.store.directory().join("recovery.json")) {
+                Ok(_) => {
+                    return Err(error(
+                        "Resolve legacy recovery before publishing another workspace.",
+                    ));
+                }
+                Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+                Err(cause) => return Err(error(cause)),
+            }
         }
         let mut manifest = WorkspaceManifest {
             active: state.active,
@@ -519,7 +558,7 @@ impl RecoveryCoordinator {
         };
         for session in &state.sessions {
             let tab = match session {
-                RecoverySession::Map(map) => RecoveryTab {
+                RecoverySession::Map(map) | RecoverySession::SavedMap(map) => RecoveryTab {
                     id: map.id(),
                     document_id: Uuid::parse_str(&map.editor.document_id).map_err(error)?,
                     saved_path: map.editor.path.clone(),
@@ -631,7 +670,9 @@ impl RecoveryCoordinator {
             .sessions
             .iter()
             .filter_map(|session| match session {
-                RecoverySession::Map(map) => Some((map.id(), Observation::of(map))),
+                RecoverySession::Map(map) | RecoverySession::SavedMap(map) => {
+                    Some((map.id(), Observation::of(map)))
+                }
                 _ => None,
             })
             .collect();
@@ -702,10 +743,7 @@ impl RecoveryCoordinator {
         let order = state
             .sessions
             .iter()
-            .map(|session| match session {
-                RecoverySession::Map(map) => map.id(),
-                RecoverySession::Failed { id, .. } => *id,
-            })
+            .map(RecoverySession::id)
             .collect::<Vec<_>>();
         let due = due || prior_order.is_some_and(|prior| prior != (state.active, order));
         if due

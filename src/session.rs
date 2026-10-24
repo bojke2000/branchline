@@ -131,3 +131,20 @@ pub enum SessionState {
     Map(Box<MapSession>),
     RestoreError(RestoreFailure),
 }
+
+impl SessionState {
+    pub fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Map(map) => map.estimated_bytes() + 128,
+            Self::RestoreError(failure) => {
+                std::mem::size_of::<Self>()
+                    + failure.reason.len()
+                    + failure
+                        .path
+                        .as_ref()
+                        .map_or(0, |path| path.as_os_str().len())
+                    + 128
+            }
+        }
+    }
+}

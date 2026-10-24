@@ -71,6 +71,7 @@ impl NativeApp {
             && self.dialog.is_none()
             && self.workspace.pending_activation().is_none()
             && self.pending_close.is_none()
+            && !self.pending_quit
         {
             let result = self.edit(EditorEdit::FlushDetails);
             self.report(result);

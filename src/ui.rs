@@ -1,6 +1,6 @@
 pub use crate::commands::palette_matches;
 use crate::{
-    app::{DraftField, EditorAction, EditorEdit, EditorError, EditorKey, PendingAction},
+    app::{DraftField, EditorAction, EditorEdit, EditorError, EditorKey},
     appearance,
     commands::{self, AppCommand, FILE_COMMANDS, NAVIGATION_COMMANDS, VIEW_COMMANDS},
     document::{Command, DeletionPlan, MovePlacement, NodeId},
@@ -11,7 +11,7 @@ use crate::{
     recovery::RecoveryCoordinator,
     session::{SessionId, Viewport},
     storage::{StorageError, atomic_write, read_bounded},
-    workspace::Workspace,
+    workspace::{CloseDecision, TransitionProgress, Workspace},
 };
 use eframe::egui::{self, Color32, FontId, Id, Key, Pos2, Sense, Stroke, Vec2};
 use std::{
@@ -27,8 +27,7 @@ enum CanvasDrag {
 }
 
 enum Dialog {
-    CloseTab(SessionId),
-    Unsaved,
+    CloseDecision(SessionId),
     Recovery,
     Import,
     Delete(DeletionPlan),
@@ -42,6 +41,7 @@ enum Dialog {
 mod details;
 mod recovery;
 mod tabs;
+mod workspace_dialogs;
 
 pub struct NativeApp {
     pub workspace: Workspace,
@@ -70,12 +70,12 @@ pub struct NativeApp {
     input_after_switch: bool,
     owned_widgets: BTreeMap<SessionId, HashSet<Id>>,
     pending_close: Option<SessionId>,
+    pending_quit: bool,
     pending_import: Option<ImportReport>,
 }
 
 impl NativeApp {
-    pub fn new(store: impl Into<RecoveryCoordinator>) -> Result<Self, StorageError> {
-        let mut store = store.into();
+    pub fn new(mut store: RecoveryCoordinator) -> Result<Self, StorageError> {
         let restore = store.load()?;
         let recovery_pending = restore.has_recovery();
         let notices = restore.warnings.join("\n");
@@ -113,6 +113,7 @@ impl NativeApp {
             input_after_switch: false,
             owned_widgets: BTreeMap::new(),
             pending_close: None,
+            pending_quit: false,
             pending_import: None,
         })
     }
@@ -231,7 +232,7 @@ impl NativeApp {
             AppCommand::Save => self.save_file(false, ctx),
             AppCommand::SaveAs => self.save_file(true, ctx),
             AppCommand::Export => self.export_file(ctx),
-            AppCommand::Quit => self.request(PendingAction::Quit, ctx),
+            AppCommand::Quit => self.queue_quit(),
             AppCommand::Search => self.open_search(),
             AppCommand::Palette => self.open_palette(),
             AppCommand::Notes => {
@@ -444,38 +445,6 @@ impl NativeApp {
         });
     }
 
-    fn request(&mut self, action: PendingAction, ctx: &egui::Context) {
-        let result = self
-            .prepare()
-            .and_then(|_| self.workspace.map_mut().editor.request(action));
-        match result {
-            Ok(true) => self.perform_pending(ctx),
-            Ok(false) => self.dialog = Some(Dialog::Unsaved),
-            Err(error) => self.error = Some(error.to_string()),
-        }
-    }
-
-    fn perform_pending(&mut self, ctx: &egui::Context) {
-        let Some(action) = self.workspace.map().editor.pending.clone() else {
-            return;
-        };
-        let result = (|| -> Result<(), EditorError> {
-            match action {
-                PendingAction::Quit => {
-                    self.checkpoint_recovery()?;
-                    self.workspace.map_mut().editor.pending = None;
-                    self.allow_close = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-            Ok(())
-        })();
-        if result.is_err() {
-            self.workspace.map_mut().editor.cancel_pending();
-        }
-        self.report(result);
-    }
-
     fn open_file(&mut self, _ctx: &egui::Context) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Mind maps", &["branchline", "mm"])
@@ -503,14 +472,25 @@ impl NativeApp {
     }
 
     fn save_file(&mut self, save_as: bool, ctx: &egui::Context) {
-        let session = self.workspace.active_id();
-        let path = if save_as || self.workspace.map().editor.path.is_none() {
+        self.save_session(self.workspace.active_id(), save_as, ctx);
+    }
+
+    fn save_session(&mut self, session: SessionId, save_as: bool, ctx: &egui::Context) {
+        let selected = match self.workspace.session(session) {
+            Ok(map) => map.editor.path.clone(),
+            Err(cause) => {
+                self.abort_transition();
+                self.error = Some(cause.to_string());
+                return;
+            }
+        };
+        let path = if save_as || selected.is_none() {
             rfd::FileDialog::new()
                 .add_filter("BMM mind map", &["branchline"])
                 .set_file_name("Ideas.branchline")
                 .save_file()
         } else {
-            self.workspace.map().editor.path.clone()
+            selected
         };
         if let Some(path) = path {
             if path.exists() {
@@ -522,6 +502,8 @@ impl NativeApp {
             } else {
                 self.publish(session, path, None, ctx);
             }
+        } else if self.workspace.transition_pending() {
+            self.abort_transition();
         }
     }
 
@@ -553,15 +535,17 @@ impl NativeApp {
                     if is_export { "Exported" } else { "Saved" },
                     path.display()
                 );
-                if !is_export && self.workspace.map().editor.pending.is_some() {
-                    self.perform_pending(ctx);
+                if !is_export && self.workspace.transition_pending() {
+                    let progress = self
+                        .workspace
+                        .resume_after_save(session)
+                        .map_err(EditorError::from);
+                    self.drive_transition(progress, ctx);
                 }
             }
             Err(error) => {
                 self.error = Some(error.to_string());
-                if self.workspace.map().editor.pending.is_some() {
-                    self.dialog = Some(Dialog::Unsaved);
-                }
+                self.abort_transition();
             }
         }
     }
@@ -598,6 +582,10 @@ impl NativeApp {
 
     pub fn show(&mut self, root_ui: &mut egui::Ui) {
         let ctx = root_ui.ctx().clone();
+        if self.allow_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         if !self.theme_initialized {
             ctx.set_theme(egui::Theme::Dark);
             root_ui.style_mut().visuals = egui::Visuals::dark();
@@ -610,7 +598,7 @@ impl NativeApp {
         if ctx.input(|input| input.viewport().close_requested()) && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.dialog.is_none() {
-                self.request(PendingAction::Quit, &ctx);
+                self.queue_quit();
             }
         }
         if self.dialog.is_none() {
@@ -667,7 +655,7 @@ impl NativeApp {
             self.details_panel(root_ui);
         }
         egui::CentralPanel::default().show(root_ui, |ui| {
-            ui.add_enabled_ui(!blocked, |ui| self.canvas(ui));
+            ui.add_enabled_ui(self.dialog.is_none(), |ui| self.canvas(ui));
         });
         if !blocked {
             self.palette(&ctx);
@@ -889,9 +877,7 @@ impl NativeApp {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.drag.is_some() {
             if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape)) {
-                if let Some(CanvasDrag::Pan { initial_pan, .. }) = self.drag.take() {
-                    self.workspace.map_mut().viewport.pan = initial_pan;
-                }
+                self.cancel_canvas_drag();
                 self.status = "Drag canceled. The map was not changed.".into();
             }
             return;
@@ -984,7 +970,11 @@ impl NativeApp {
             if !blocked
                 && let Some((
                     keycode,
-                    command @ (AppCommand::NextTab | AppCommand::PreviousTab | AppCommand::New),
+                    command @ (AppCommand::NextTab
+                    | AppCommand::PreviousTab
+                    | AppCommand::New
+                    | AppCommand::CloseTab
+                    | AppCommand::Quit),
                 )) = bound
             {
                 ctx.input_mut(|input| input.consume_key(modifiers, keycode));
@@ -1328,6 +1318,7 @@ impl NativeApp {
                     && !first_focus
                     && self.workspace.pending_activation().is_none()
                     && self.pending_close.is_none()
+                    && !self.pending_quit
                 {
                     edit_key = Some((EditorKey::Enter, response.id));
                 }
@@ -1697,23 +1688,26 @@ impl NativeApp {
         egui::Modal::new(Id::unique("file-dialog")).show(ctx, |ui| {
             ui.set_width(470.0);
             match &dialog {
-                Dialog::CloseTab(id) => {
-                    ui.heading("Keep this map open?");
-                    ui.label("This tab has unsaved work. Save it before closing, or cancel.");
-                    if ui.button("Cancel").clicked() { keep = false; }
-                    if ui.button("Save first").clicked() {
-                        keep = false;
-                        let result = self.workspace.request_activate(*id).map_err(EditorError::from);
-                        self.report(result);
-                    }
-                }
-                Dialog::Unsaved => {
+                Dialog::CloseDecision(id) => {
                     ui.heading("Keep these ideas?");
-                    ui.label("Save your changes before continuing.");
+                    let title = self.workspace.order().iter().position(|candidate| candidate == id)
+                        .map(|index| format!("Untitled {}", index + 1)).unwrap_or_else(|| "Missing map".into());
+                    let path = match self.workspace.entry(*id) {
+                        Ok(crate::session::SessionState::Map(map)) => map.editor.path.as_ref(),
+                        Ok(crate::session::SessionState::RestoreError(error)) => error.path.as_ref(),
+                        Err(_) => None,
+                    };
+                    ui.strong(path.map_or(title, |path| path.display().to_string()));
+                    ui.label("Save this map, discard its unsaved work, or cancel the whole operation.");
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() { keep = false; self.save_file(false, ctx); if self.dialog.is_none() && self.workspace.map().editor.pending.is_some() { self.dialog = Some(Dialog::Unsaved); } }
-                        if ui.button("Discard changes").clicked() { keep = false; self.perform_pending(ctx); }
-                        if ui.button("Cancel").clicked() { keep = false; self.workspace.map_mut().editor.cancel_pending(); }
+                        for (label, decision) in [("Save", CloseDecision::Save), ("Discard changes", CloseDecision::Discard), ("Cancel", CloseDecision::Cancel)] {
+                            let enabled = label != "Save" || self.workspace.session(*id).is_ok();
+                            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                                keep = false;
+                                let progress = self.workspace.resolve(decision).map_err(EditorError::from);
+                                self.drive_transition(progress, ctx);
+                            }
+                        }
                     });
                 }
                 Dialog::Recovery => {
@@ -1778,7 +1772,7 @@ impl NativeApp {
                         if ui.button("Replace file").clicked() { keep = false; self.publish(*session, path.clone(), export.clone(), ctx); }
                         if ui.button("Cancel").clicked() {
                             keep = false;
-                            if self.workspace.map().editor.pending.is_some() { self.dialog = Some(Dialog::Unsaved); }
+                            self.abort_transition();
                         }
                     });
                 }

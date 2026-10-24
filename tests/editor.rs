@@ -23,61 +23,76 @@ fn edit_modes_route_keys() {
 }
 
 #[test]
-fn cancelled_import_is_transactional() {
-    let mut editor = Editor::new();
-    editor.dispatch(EditorAction::AddChild).unwrap();
-    editor.commit_edit().unwrap();
-    let before = editor.document.clone();
-    let selected = editor.selected.clone();
-    editor.stage_import(
-        import_mm(br#"<map><node ID="r" TEXT="Imported"><font SIZE="24"/></node></map>"#).unwrap(),
-    );
-    editor.cancel_import();
-    assert_eq!(editor.document, before);
-    assert_eq!(editor.selected, selected);
-    assert!(editor.path.is_none());
-    editor.dispatch(EditorAction::Undo).unwrap();
-    assert_eq!(editor.document.nodes.len(), 1);
-}
-
-#[test]
 fn failed_save_blocks_close() {
-    let mut editor = Editor::new();
-    editor.dispatch(EditorAction::AddChild).unwrap();
-    editor.commit_edit().unwrap();
-    assert!(!editor.request(PendingAction::Quit).unwrap());
+    use branchline::workspace::{CloseDecision, TransitionProgress, Workspace};
+    let mut workspace = Workspace::new();
+    let id = workspace.active_id();
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::AddChild))
+        .unwrap();
+    workspace.apply(id, EditorEdit::CommitDrafts).unwrap();
+    assert_eq!(
+        workspace.request_quit().unwrap(),
+        TransitionProgress::AwaitingDecision(id)
+    );
+    workspace.resolve(CloseDecision::Save).unwrap();
     let temp = tempfile::tempdir().unwrap();
     assert!(
-        editor
-            .save_to(&temp.path().join("missing/map.branchline"))
+        workspace
+            .save(id, &temp.path().join("missing/map.branchline"))
             .is_err()
     );
-    assert!(editor.is_dirty());
-    assert!(matches!(editor.pending, Some(PendingAction::Quit)));
-    editor.cancel_pending();
-    assert!(editor.pending.is_none());
+    assert!(workspace.map().editor.is_dirty());
+    assert!(workspace.transition_pending());
+    workspace.resolve(CloseDecision::Cancel).unwrap();
+    assert!(!workspace.transition_pending());
     let path = temp.path().join("map.branchline");
-    editor.save_to(&path).unwrap();
-    assert!(!editor.is_dirty());
-    editor.dispatch(EditorAction::Undo).unwrap();
-    assert!(editor.is_dirty());
-    editor.dispatch(EditorAction::Redo).unwrap();
-    assert!(!editor.is_dirty());
+    workspace.save(id, &path).unwrap();
+    assert!(!workspace.map().editor.is_dirty());
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::Undo))
+        .unwrap();
+    assert!(workspace.map().editor.is_dirty());
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::Redo))
+        .unwrap();
+    assert!(!workspace.map().editor.is_dirty());
 }
 
 #[test]
-fn replacing_document_clears_old_history_and_save_path() {
-    let mut editor = Editor::new();
-    editor.dispatch(EditorAction::AddChild).unwrap();
-    editor.commit_edit().unwrap();
-    editor.stage_import(import_mm(br#"<map><node ID="r" TEXT="Imported"/></map>"#).unwrap());
-    editor.accept_import().unwrap();
-    editor.dispatch(EditorAction::Undo).unwrap();
+fn imported_tab_has_independent_history_and_no_native_save_path() {
+    let mut workspace = branchline::workspace::Workspace::new();
+    let original = workspace.active_id();
+    workspace
+        .apply(original, EditorEdit::Action(EditorAction::AddChild))
+        .unwrap();
+    workspace.apply(original, EditorEdit::CommitDrafts).unwrap();
+    workspace
+        .accept_import(import_mm(br#"<map><node ID="r" TEXT="Imported"/></map>"#).unwrap())
+        .unwrap();
+    workspace.apply_pending_activation().unwrap();
+    workspace
+        .apply(
+            workspace.active_id(),
+            EditorEdit::Action(EditorAction::Undo),
+        )
+        .unwrap();
+    let editor = &workspace.map().editor;
     assert_eq!(editor.document.root, "r");
     assert_eq!(editor.document.nodes["r"].text, "Imported");
     assert_eq!(editor.document.nodes.len(), 1);
     assert!(editor.path.is_none());
     assert!(editor.is_dirty());
+    assert_eq!(
+        workspace
+            .session(original)
+            .unwrap()
+            .editor
+            .document
+            .nodes
+            .len(),
+        2
+    );
 }
 
 #[test]

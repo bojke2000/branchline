@@ -1,8 +1,7 @@
 use branchline::{
     app::{DraftField, EditorAction, EditorEdit},
     document::{Command, Document},
-    recovery::{RecoveryCoordinator, RestoreContent},
-    storage::{RecoveryRecord, RecoveryStore},
+    recovery::{LegacyRecoveryRecord, RecoveryCoordinator, RestoreContent},
     workspace::Workspace,
 };
 use std::fs;
@@ -224,15 +223,17 @@ fn replaced_manifest_blocks_publication_and_cleanup() {
 #[test]
 fn legacy_migration_is_idempotent_and_nonoverwriting() {
     let temp = tempfile::tempdir().unwrap();
-    let record = RecoveryRecord {
+    let record = LegacyRecoveryRecord {
         version: 1,
         document_id: uuid::Uuid::new_v4().to_string(),
         original_path: None,
         document: Document::new("Legacy recovery"),
     };
-    let legacy = RecoveryStore::open(temp.path().into()).unwrap();
-    legacy.write(&record).unwrap();
-    drop(legacy);
+    fs::write(
+        temp.path().join("recovery.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
     let original = fs::read(temp.path().join("recovery.json")).unwrap();
     let backup = temp.path().join("recovery-v1.backup.json");
     fs::write(&backup, b"unrelated backup").unwrap();
@@ -263,7 +264,6 @@ fn exclusive_lock_is_workspace_wide() {
     let temp = tempfile::tempdir().unwrap();
     let store = RecoveryCoordinator::open(temp.path().into()).unwrap();
     assert!(RecoveryCoordinator::open(temp.path().into()).is_err());
-    assert!(RecoveryStore::open(temp.path().into()).is_err());
     drop(store);
     assert!(RecoveryCoordinator::open(temp.path().into()).is_ok());
 }
@@ -557,9 +557,7 @@ fn failed_later_snapshot_reuses_unpublished_owned_siblings_on_retry() {
     node.children.push(child.id.clone());
     document.nodes.insert(child.id.clone(), child);
     let mut map = branchline::session::MapSession::new_blank(branchline::session::SessionId::new());
-    map.editor
-        .replace_document(document, None, false, None)
-        .unwrap();
+    map.editor = branchline::app::Editor::from_document(document, None, false, None).unwrap();
     workspace.insert_session(map).unwrap();
     assert!(store.publish(&workspace.recovery_state()).is_err());
     let before = snapshot_paths(temp.path());
@@ -645,4 +643,53 @@ fn per_session_debounce_is_not_reset_by_other_maps_and_tracks_view_only_changes(
     );
     let restore = store.load().unwrap();
     assert_eq!(restore.sessions[1].tab.view.pan[0], 120.0);
+}
+
+#[test]
+fn retry_and_locate_replace_only_the_failed_tab_with_validated_fresh_contents() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = RecoveryCoordinator::open(temp.path().join("recovery")).unwrap();
+    let mut workspace = Workspace::new();
+    let source = workspace.active_id();
+    let missing = temp.path().join("missing.branchline");
+    workspace.save(source, &missing).unwrap();
+    let sibling = workspace.new_map().unwrap();
+    workspace.apply_pending_activation().unwrap();
+    edited(&mut workspace, "Sibling recovery");
+    store.publish(&workspace.recovery_state()).unwrap();
+    fs::remove_file(&missing).unwrap();
+    let mut restored = Workspace::from_restore(store.load().unwrap(), true).unwrap();
+    assert!(restored.session(source).is_err());
+    let sibling_before = restored.session(sibling).unwrap().editor.document.clone();
+    assert!(
+        restored
+            .retry_restore(store.retry_session(source).unwrap())
+            .is_err()
+    );
+    let located = temp.path().join("located.branchline");
+    fs::write(
+        &located,
+        branchline::interchange::write_native(&Document::new("Located fresh contents")).unwrap(),
+    )
+    .unwrap();
+    let mut candidate = store.retry_session(source).unwrap();
+    candidate.tab.saved_path = Some(located.clone());
+    candidate.content = RestoreContent::Saved;
+    restored.retry_restore(candidate).unwrap();
+    assert_eq!(restored.order(), &[source, sibling]);
+    assert_eq!(
+        restored.session(sibling).unwrap().editor.document,
+        sibling_before
+    );
+    let map = restored.session(source).unwrap();
+    assert_eq!(map.editor.path.as_ref(), Some(&located));
+    assert_eq!(
+        map.editor.document.nodes[&map.editor.document.root].text,
+        "Located fresh contents"
+    );
+    assert_eq!(
+        map.editor.selected, map.editor.document.root,
+        "stale saved selection must not survive a new file"
+    );
+    assert!(!map.editor.is_dirty());
 }

@@ -8,6 +8,10 @@ use crate::{
 use std::{collections::BTreeMap, path::Path};
 use thiserror::Error;
 
+mod lifecycle;
+use lifecycle::Transition;
+pub use lifecycle::{CloseDecision, TransitionProgress};
+
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct WorkspaceError(pub String);
@@ -20,6 +24,7 @@ pub struct Workspace {
     storage_limit: usize,
     history_limit: usize,
     next_stamp: u64,
+    transition: Option<Transition>,
 }
 
 impl Default for Workspace {
@@ -70,14 +75,13 @@ impl Workspace {
                         (document, true, FileIdentityState::Known(opened.identity))
                     }
                 };
-                map.editor
-                    .replace_document(
-                        document,
-                        tab.saved_path.clone(),
-                        clean,
-                        Some(tab.document_id.to_string()),
-                    )
-                    .map_err(|error| WorkspaceError(error.to_string()))?;
+                map.editor = crate::app::Editor::from_document(
+                    document,
+                    tab.saved_path.clone(),
+                    clean,
+                    Some(tab.document_id.to_string()),
+                )
+                .map_err(|error| WorkspaceError(error.to_string()))?;
                 map.file_identity = identity;
                 map.pristine_blank = false;
                 if let Some(selected) = &tab.view.selected
@@ -107,14 +111,7 @@ impl Workspace {
                 reason: failure,
                 retain_recovery: recover && tab.snapshot.is_some(),
             });
-            let estimated = match &entry {
-                SessionState::RestoreError(error) => error
-                    .reason
-                    .len()
-                    .saturating_add(error.path.as_ref().map_or(0, |path| path.as_os_str().len()))
-                    .saturating_add(256),
-                _ => unreachable!(),
-            };
+            let estimated = entry.estimated_bytes();
             if workspace.estimated_bytes().saturating_add(estimated) > workspace.storage_limit {
                 return Err(WorkspaceError("Restored workspace metadata exceeds storage capacity; the recovery store was retained.".into()));
             }
@@ -133,18 +130,22 @@ impl Workspace {
 
     fn manifest_bound(&self) -> usize {
         self.entries.values().fold(256usize, |total, entry| {
-            total.saturating_add(match entry {
-                SessionState::Map(map) => crate::recovery::editor_manifest_bound(&map.editor),
-                SessionState::RestoreError(failure) => 2048usize
-                    .saturating_add(failure.reason.len().saturating_mul(6))
-                    .saturating_add(
-                        failure
-                            .path
-                            .as_ref()
-                            .map_or(0, |path| path.as_os_str().len().saturating_mul(6)),
-                    ),
-            })
+            total.saturating_add(Self::entry_manifest_bound(entry))
         })
+    }
+
+    fn entry_manifest_bound(entry: &SessionState) -> usize {
+        match entry {
+            SessionState::Map(map) => crate::recovery::editor_manifest_bound(&map.editor),
+            SessionState::RestoreError(failure) => 2048usize
+                .saturating_add(failure.reason.len().saturating_mul(6))
+                .saturating_add(
+                    failure
+                        .path
+                        .as_ref()
+                        .map_or(0, |path| path.as_os_str().len().saturating_mul(6)),
+                ),
+        }
     }
 
     pub fn recovery_state(&self) -> crate::recovery::WorkspaceRecoveryState<'_> {
@@ -176,6 +177,7 @@ impl Workspace {
             storage_limit: 256 * 1024 * 1024,
             history_limit: 64 * 1024 * 1024,
             next_stamp: 0,
+            transition: None,
         }
     }
 
@@ -240,21 +242,14 @@ impl Workspace {
     pub fn estimated_bytes(&self) -> usize {
         self.entries
             .values()
-            .map(|entry| match entry {
-                SessionState::Map(map) => map.estimated_bytes() + 128,
-                SessionState::RestoreError(error) => {
-                    std::mem::size_of::<SessionState>()
-                        + error.reason.len()
-                        + error.path.as_ref().map_or(0, |path| path.as_os_str().len())
-                        + 128
-                }
-            })
+            .map(SessionState::estimated_bytes)
             .sum::<usize>()
             + self.order.len() * std::mem::size_of::<SessionId>()
             + std::mem::size_of::<Self>()
     }
 
     pub fn apply(&mut self, id: SessionId, edit: EditorEdit) -> Result<(), WorkspaceError> {
+        self.require_idle()?;
         let session = self.session(id)?;
         let prepared = session
             .editor
@@ -305,6 +300,14 @@ impl Workspace {
     }
 
     pub fn destination_owner(&self, path: &Path) -> Result<Option<SessionId>, WorkspaceError> {
+        self.destination_owner_for(path, None)
+    }
+
+    fn destination_owner_for(
+        &self,
+        path: &Path,
+        source: Option<SessionId>,
+    ) -> Result<Option<SessionId>, WorkspaceError> {
         let destination = match std::fs::symlink_metadata(path) {
             Ok(_) => {
                 Some(FileIdentity::open(path).map_err(|error| WorkspaceError(error.to_string()))?)
@@ -312,6 +315,7 @@ impl Workspace {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(WorkspaceError(format!("{}: {error}", path.display()))),
         };
+        let mut owner = None;
         for (id, entry) in &self.entries {
             let SessionState::Map(map) = entry else {
                 continue;
@@ -319,6 +323,9 @@ impl Workspace {
             let Some(selected) = &map.editor.path else {
                 continue;
             };
+            if destination.is_none() && source == Some(*id) {
+                continue;
+            }
             let loaded = match &map.file_identity {
                 FileIdentityState::Known(identity) => identity,
                 FileIdentityState::Unresolved(reason) => {
@@ -339,14 +346,17 @@ impl Workspace {
                     selected.display()
                 )));
             }
-            if destination.as_ref() == Some(loaded) {
-                return Ok(Some(*id));
+            if destination.as_ref() == Some(loaded) && owner.replace(*id).is_some() {
+                return Err(WorkspaceError(
+                    "Multiple tabs have unresolved ownership of the same destination.".into(),
+                ));
             }
         }
-        Ok(None)
+        Ok(owner)
     }
 
     pub fn open_native(&mut self, file: OpenedFile) -> Result<SessionId, WorkspaceError> {
+        self.require_idle()?;
         let current = FileIdentity::open(&file.selected_path)
             .map_err(|error| WorkspaceError(error.to_string()))?;
         if current != file.identity {
@@ -361,24 +371,82 @@ impl Workspace {
         let document =
             read_native(&file.bytes).map_err(|error| WorkspaceError(error.to_string()))?;
         let mut map = MapSession::new_blank(SessionId::new());
-        map.editor
-            .replace_document(document, Some(file.selected_path), true, None)
-            .map_err(|error| WorkspaceError(error.to_string()))?;
+        map.editor =
+            crate::app::Editor::from_document(document, Some(file.selected_path), true, None)
+                .map_err(|error| WorkspaceError(error.to_string()))?;
         map.file_identity = FileIdentityState::Known(file.identity);
         self.insert_session(map)
     }
 
     pub fn accept_import(&mut self, report: ImportReport) -> Result<SessionId, WorkspaceError> {
         let mut map = MapSession::new_blank(SessionId::new());
-        map.editor
-            .replace_document(report.document, None, false, None)
+        map.editor = crate::app::Editor::from_document(report.document, None, false, None)
             .map_err(|error| WorkspaceError(error.to_string()))?;
         self.insert_session(map)
     }
 
+    pub fn retry_restore(
+        &mut self,
+        restored: crate::recovery::RestoredSession,
+    ) -> Result<(), WorkspaceError> {
+        self.require_idle()?;
+        let id = restored.tab.id;
+        if !matches!(self.entry(id)?, SessionState::RestoreError(_)) {
+            return Err(WorkspaceError(
+                "Only a failed tab can be retried or located.".into(),
+            ));
+        }
+        let restore = crate::recovery::WorkspaceRestore {
+            active: Some(id),
+            sessions: vec![restored],
+            warnings: vec![],
+        };
+        let mut loaded = Self::from_restore(restore, true)?;
+        let entry = loaded.entries.remove(&id).ok_or_else(|| {
+            WorkspaceError("The failed tab has no saved file or recovery snapshot to retry.".into())
+        })?;
+        let SessionState::Map(map) = &entry else {
+            let SessionState::RestoreError(failure) = entry else {
+                unreachable!()
+            };
+            return Err(WorkspaceError(failure.reason));
+        };
+        if let Some(path) = &map.editor.path {
+            if self.destination_owner(path)?.is_some() {
+                return Err(WorkspaceError(
+                    "Another open tab owns the located file; the failed tab was retained.".into(),
+                ));
+            }
+            if let FileIdentityState::Known(identity) = &map.file_identity
+                && FileIdentity::open(path).map_err(|error| WorkspaceError(error.to_string()))?
+                    != *identity
+            {
+                return Err(WorkspaceError(
+                    "The located file changed before it could be admitted.".into(),
+                ));
+            }
+        }
+        let prior = self.entry(id)?;
+        if self.estimated_bytes() - prior.estimated_bytes() + entry.estimated_bytes()
+            > self.storage_limit
+            || self
+                .manifest_bound()
+                .saturating_sub(Self::entry_manifest_bound(prior))
+                .saturating_add(Self::entry_manifest_bound(&entry))
+                > crate::document::MAX_FILE_BYTES
+        {
+            return Err(WorkspaceError(
+                "The retried map exceeds workspace capacity; the failed tab was retained.".into(),
+            ));
+        }
+        self.entries.insert(id, entry);
+        Ok(())
+    }
+
     pub fn save(&mut self, id: SessionId, path: &Path) -> Result<(), WorkspaceError> {
+        self.require_save_target(id)?;
         if self
-            .destination_owner(path)?
+            .destination_owner_for(path, Some(id))?
             .is_some_and(|owner| owner != id)
         {
             return Err(WorkspaceError(
@@ -459,6 +527,7 @@ impl Workspace {
     }
 
     pub fn insert_session(&mut self, mut map: MapSession) -> Result<SessionId, WorkspaceError> {
+        self.require_idle()?;
         let id = map.id();
         if map.editor.revision != 0 {
             map.pristine_blank = false;
@@ -514,37 +583,6 @@ impl Workspace {
         if let Some(id) = self.pending_activation.take() {
             self.entry(id)?;
             self.active = id;
-        }
-        Ok(())
-    }
-
-    pub fn close_clean(&mut self, id: SessionId) -> Result<(), WorkspaceError> {
-        let map = self.session(id)?;
-        if map.editor.is_dirty()
-            || map
-                .editor
-                .has_drafts()
-                .map_err(|error| WorkspaceError(error.to_string()))?
-        {
-            return Err(WorkspaceError(
-                "Cannot close a tab with unsaved work without a decision.".into(),
-            ));
-        }
-        if self.order.len() == 1 {
-            self.new_map()?;
-            self.apply_pending_activation()?;
-        } else if self.active == id {
-            let index = self
-                .order
-                .iter()
-                .position(|candidate| *candidate == id)
-                .expect("tab exists");
-            self.active = self.order[if index == 0 { 1 } else { index - 1 }];
-        }
-        self.order.retain(|candidate| *candidate != id);
-        self.entries.remove(&id);
-        if self.pending_activation == Some(id) {
-            self.pending_activation = None;
         }
         Ok(())
     }

@@ -1,5 +1,5 @@
 use crate::document::{Document, MAX_FILE_BYTES};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -82,25 +82,14 @@ pub(crate) fn atomic_write_opened(path: &Path, bytes: &[u8]) -> Result<File, Sto
     temporary.persist(path).map_err(|e| failure(path, e.error))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecoveryRecord {
-    pub version: u32,
-    pub document_id: String,
-    pub original_path: Option<PathBuf>,
-    pub document: Document,
-}
-
-pub struct RecoveryStore {
-    path: PathBuf,
+pub(crate) struct RecoveryLock {
+    directory: PathBuf,
     _lock: File,
 }
 
-impl RecoveryStore {
+impl RecoveryLock {
     pub(crate) fn directory(&self) -> &Path {
-        self.path
-            .parent()
-            .expect("recovery store has a parent directory")
+        &self.directory
     }
 
     pub fn open(directory: PathBuf) -> Result<Self, StorageError> {
@@ -122,64 +111,9 @@ impl RecoveryStore {
             )
         })?;
         Ok(Self {
-            path: directory.join("recovery.json"),
+            directory,
             _lock: lock,
         })
-    }
-
-    pub fn load(&self) -> Result<Option<RecoveryRecord>, StorageError> {
-        match fs::symlink_metadata(&self.path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(failure(&self.path, e)),
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(failure(&self.path, "Recovery must be a regular file"));
-            }
-            Ok(_) => {}
-        }
-        let bytes = read_bounded(&self.path)?;
-        let record: RecoveryRecord =
-            serde_json::from_slice(&bytes).map_err(|e| failure(&self.path, e))?;
-        Self::validate(&record).map_err(|e| failure(&self.path, e))?;
-        Ok(Some(record))
-    }
-
-    pub(crate) fn validate(record: &RecoveryRecord) -> Result<(), StorageError> {
-        if record.version != 1 || uuid::Uuid::parse_str(&record.document_id).is_err() {
-            return Err(StorageError(
-                "Unsupported or malformed recovery identity".into(),
-            ));
-        }
-        record
-            .document
-            .validate()
-            .map_err(|e| StorageError(e.to_string()))
-    }
-
-    pub fn write(&self, record: &RecoveryRecord) -> Result<(), StorageError> {
-        Self::validate(record)?;
-        if let Some(existing) = self.load()?
-            && existing.document_id != record.document_id
-        {
-            return Err(failure(
-                &self.path,
-                "Unresolved recovery belongs to another document",
-            ));
-        }
-        let bytes = serde_json::to_vec(record).map_err(|e| failure(&self.path, e))?;
-        atomic_write(&self.path, &bytes)
-    }
-
-    pub fn discard(&self, document_id: &str) -> Result<(), StorageError> {
-        if let Some(record) = self.load()? {
-            if record.document_id != document_id {
-                return Err(failure(
-                    &self.path,
-                    "Cannot discard another document's recovery",
-                ));
-            }
-            fs::remove_file(&self.path).map_err(|e| failure(&self.path, e))?;
-        }
-        Ok(())
     }
 }
 

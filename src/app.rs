@@ -2,8 +2,8 @@ use crate::{
     document::{
         Command, Document, DocumentError, History, MAX_FIELD_BYTES, MAX_TEXT_BYTES, NodeId, Side,
     },
-    interchange::{FormatError, ImportReport, write_native},
-    storage::{SaveCheckpoint, StorageError, atomic_write},
+    interchange::{FormatError, write_native},
+    storage::{SaveCheckpoint, StorageError},
 };
 use std::{
     collections::BTreeSet,
@@ -56,11 +56,6 @@ pub enum EditorAction {
     Outdent,
     Navigate(Direction),
 }
-#[derive(Clone, Debug)]
-pub enum PendingAction {
-    Quit,
-}
-
 #[derive(Clone)]
 pub struct EditBuffer {
     pub id: NodeId,
@@ -136,8 +131,6 @@ pub struct Editor {
     pub details: Option<DetailsDraft>,
     pub path: Option<PathBuf>,
     pub document_id: String,
-    pub pending: Option<PendingAction>,
-    pub staged_import: Option<ImportReport>,
     pub revision: u64,
     pub draft_revision: u64,
     checkpoint: SaveCheckpoint,
@@ -168,8 +161,6 @@ impl Editor {
             details: None,
             path: None,
             document_id: Uuid::new_v4().to_string(),
-            pending: None,
-            staged_import: None,
             revision: 0,
             draft_revision: 0,
             checkpoint,
@@ -283,8 +274,6 @@ impl Editor {
             details: self.details.clone(),
             path: self.path.clone(),
             document_id: self.document_id.clone(),
-            pending: self.pending.clone(),
-            staged_import: None,
             revision: self.revision,
             draft_revision: self.draft_revision,
             checkpoint: self.checkpoint.clone(),
@@ -355,7 +344,6 @@ impl Editor {
         match edit.kind {
             PreparedKind::Editor(mut candidate) => {
                 candidate.history.stamp_since(edit.original_serial, stamp);
-                candidate.staged_import = self.staged_import.take();
                 *self = *candidate;
             }
             PreparedKind::Draft { field, text } => {
@@ -726,63 +714,23 @@ impl Editor {
         }
     }
 
-    pub fn request(&mut self, action: PendingAction) -> Result<bool, EditorError> {
-        self.commit_edit()?;
-        self.pending = Some(action);
-        Ok(!self.dirty)
-    }
-
-    pub fn cancel_pending(&mut self) {
-        self.pending = None;
-    }
-    pub fn stage_import(&mut self, report: ImportReport) {
-        self.staged_import = Some(report);
-    }
-    pub fn cancel_import(&mut self) {
-        self.staged_import = None;
-        self.pending = None;
-    }
-
-    pub fn accept_import(&mut self) -> Result<(), EditorError> {
-        let report = self
-            .staged_import
-            .take()
-            .ok_or_else(|| EditorError::State("No import is staged".into()))?;
-        self.replace_document(report.document, None, false, None)
-    }
-
-    pub fn replace_document(
-        &mut self,
+    pub fn from_document(
         document: Document,
         path: Option<PathBuf>,
         clean: bool,
         document_id: Option<String>,
-    ) -> Result<(), EditorError> {
+    ) -> Result<Self, EditorError> {
         document.validate()?;
-        self.document = document;
-        self.replace_selection(self.document.root.clone());
-        self.history = History::default();
-        self.editing = None;
-        self.details = None;
-        self.path = path;
-        self.pending = None;
-        self.staged_import = None;
-        self.document_id = document_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        self.checkpoint = SaveCheckpoint::default();
+        let mut editor = Self::new();
+        editor.document = document;
+        editor.replace_selection(editor.document.root.clone());
+        editor.path = path;
+        editor.document_id = document_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        editor.checkpoint = SaveCheckpoint::default();
         if clean {
-            self.checkpoint.mark_saved(&self.document);
+            editor.checkpoint.mark_saved(&editor.document);
         }
-        self.changed();
-        Ok(())
-    }
-
-    pub fn save_to(&mut self, path: &Path) -> Result<(), EditorError> {
-        self.commit_edit()?;
-        let bytes = write_native(&self.document)?;
-        atomic_write(path, &bytes)?;
-        self.path = Some(path.into());
-        self.checkpoint.mark_saved(&self.document);
-        self.dirty = false;
-        Ok(())
+        editor.changed();
+        Ok(editor)
     }
 }

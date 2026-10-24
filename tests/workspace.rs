@@ -2,7 +2,7 @@ use branchline::{
     app::{DetailsDraft, DraftField, EditorAction, EditorEdit},
     document::MAX_FIELD_BYTES,
     session::{MapSession, SessionId},
-    workspace::Workspace,
+    workspace::{CloseDecision, TransitionProgress, Workspace},
 };
 
 #[test]
@@ -150,10 +150,7 @@ fn maximum_supported_map_opens_beside_pristine_blank() {
     let mut workspace = Workspace::new();
     let blank = workspace.active_id();
     let mut loaded = MapSession::new_blank(SessionId::new());
-    loaded
-        .editor
-        .replace_document(document, None, true, None)
-        .unwrap();
+    loaded.editor = branchline::app::Editor::from_document(document, None, true, None).unwrap();
     workspace.insert_session(loaded).unwrap();
     assert_eq!(workspace.len(), 2);
     assert!(workspace.session(blank).unwrap().is_pristine_blank());
@@ -374,4 +371,215 @@ fn failed_save_retains_uncommitted_drafts_and_checkpoint() {
         "Do not lose the draft"
     );
     assert!(workspace.map().editor.path.is_none());
+}
+
+fn draft(workspace: &mut Workspace, text: &str) {
+    let id = workspace.active_id();
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::Edit))
+        .unwrap();
+    let root = workspace.map().editor.selected.clone();
+    workspace
+        .apply(
+            id,
+            EditorEdit::SetDraft {
+                field: DraftField::Inline(root),
+                text: text.into(),
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn cancel_later_quit_keeps_all_tabs_and_earlier_successful_saves() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut recovery =
+        branchline::recovery::RecoveryCoordinator::open(temp.path().join("recovery")).unwrap();
+    let mut workspace = Workspace::new();
+    let first = workspace.active_id();
+    draft(&mut workspace, "First pending discard");
+    let second = workspace.new_map().unwrap();
+    workspace.apply_pending_activation().unwrap();
+    draft(&mut workspace, "Second saved");
+    let third = workspace.new_map().unwrap();
+    workspace.apply_pending_activation().unwrap();
+    draft(&mut workspace, "Third cancels quit");
+    recovery.publish(&workspace.recovery_state()).unwrap();
+    assert_eq!(
+        workspace.request_quit().unwrap(),
+        TransitionProgress::AwaitingDecision(first)
+    );
+    assert_eq!(
+        workspace.resolve(CloseDecision::Discard).unwrap(),
+        TransitionProgress::AwaitingDecision(second)
+    );
+    assert_eq!(
+        workspace.resolve(CloseDecision::Save).unwrap(),
+        TransitionProgress::AwaitingSave(second)
+    );
+    workspace
+        .save(second, &temp.path().join("second.branchline"))
+        .unwrap();
+    assert_eq!(
+        workspace.resume_after_save(second).unwrap(),
+        TransitionProgress::AwaitingDecision(third)
+    );
+    assert!(matches!(
+        workspace.resolve(CloseDecision::Cancel).unwrap(),
+        TransitionProgress::Finished { quit: false, .. }
+    ));
+    assert_eq!(workspace.order(), &[first, second, third]);
+    assert!(
+        workspace
+            .session(first)
+            .unwrap()
+            .editor
+            .has_drafts()
+            .unwrap()
+    );
+    assert!(!workspace.session(second).unwrap().editor.is_dirty());
+    assert!(
+        workspace
+            .session(third)
+            .unwrap()
+            .editor
+            .has_drafts()
+            .unwrap()
+    );
+    let restored = recovery.load().unwrap();
+    assert!(
+        restored.sessions[0].tab.snapshot.is_some(),
+        "pending discard must not erase recovery"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn discard_publication_failure_keeps_draft() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let mut recovery = branchline::recovery::RecoveryCoordinator::open(temp.path().into()).unwrap();
+    let mut workspace = Workspace::new();
+    let source = workspace.active_id();
+    draft(&mut workspace, "Keep on failed publication");
+    recovery.publish(&workspace.recovery_state()).unwrap();
+    assert_eq!(
+        workspace.request_close(source).unwrap(),
+        TransitionProgress::AwaitingDecision(source)
+    );
+    assert_eq!(
+        workspace.resolve(CloseDecision::Discard).unwrap(),
+        TransitionProgress::ReadyToPublish
+    );
+    let permissions = std::fs::metadata(temp.path()).unwrap().permissions();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = workspace.publish_transition(&mut recovery);
+    std::fs::set_permissions(temp.path(), permissions).unwrap();
+    assert!(result.is_err());
+    assert_eq!(workspace.active_id(), source);
+    assert_eq!(
+        workspace.map().editor.editing.as_ref().unwrap().text,
+        "Keep on failed publication"
+    );
+    assert_eq!(workspace.len(), 1);
+    assert!(recovery.load().unwrap().has_recovery());
+    assert!(!workspace.transition_pending());
+}
+
+#[test]
+fn close_inactive_tab_uses_stable_identity_and_last_close_creates_a_blank() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut recovery = branchline::recovery::RecoveryCoordinator::open(temp.path().into()).unwrap();
+    let mut workspace = Workspace::new();
+    let first = workspace.active_id();
+    draft(&mut workspace, "Inactive draft");
+    let second = workspace.new_map().unwrap();
+    workspace.apply_pending_activation().unwrap();
+    let third = workspace.new_map().unwrap();
+    workspace.apply_pending_activation().unwrap();
+    assert_eq!(
+        workspace.request_close(first).unwrap(),
+        TransitionProgress::AwaitingDecision(first)
+    );
+    assert_eq!(
+        workspace.resolve(CloseDecision::Discard).unwrap(),
+        TransitionProgress::ReadyToPublish
+    );
+    let result = workspace.publish_transition(&mut recovery).unwrap();
+    assert!(matches!(
+        result,
+        TransitionProgress::Finished { quit: false, .. }
+    ));
+    assert_eq!(workspace.order(), &[second, third]);
+    assert_eq!(workspace.active_id(), third);
+    workspace.request_close(second).unwrap();
+    workspace.publish_transition(&mut recovery).unwrap();
+    workspace.request_close(third).unwrap();
+    workspace.publish_transition(&mut recovery).unwrap();
+    assert_eq!(workspace.len(), 1);
+    assert_ne!(workspace.active_id(), third);
+    assert!(workspace.map().is_pristine_blank());
+}
+
+#[test]
+fn quit_discard_reopens_saved_maps_from_disk_and_omits_untitled_maps() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut recovery =
+        branchline::recovery::RecoveryCoordinator::open(temp.path().join("recovery")).unwrap();
+    let mut workspace = Workspace::new();
+    let saved = workspace.active_id();
+    workspace
+        .save(saved, &temp.path().join("saved.branchline"))
+        .unwrap();
+    draft(&mut workspace, "Discard newer saved-map draft");
+    let untitled = workspace.new_map().unwrap();
+    workspace.apply_pending_activation().unwrap();
+    draft(&mut workspace, "Discard untitled");
+    recovery.publish(&workspace.recovery_state()).unwrap();
+    assert_eq!(
+        workspace.request_quit().unwrap(),
+        TransitionProgress::AwaitingDecision(saved)
+    );
+    assert_eq!(
+        workspace.resolve(CloseDecision::Discard).unwrap(),
+        TransitionProgress::AwaitingDecision(untitled)
+    );
+    assert_eq!(
+        workspace.resolve(CloseDecision::Discard).unwrap(),
+        TransitionProgress::ReadyToPublish
+    );
+    assert!(matches!(
+        workspace.publish_transition(&mut recovery).unwrap(),
+        TransitionProgress::Finished { quit: true, .. }
+    ));
+    let restore = recovery.load().unwrap();
+    assert_eq!(restore.sessions.len(), 1);
+    assert!(!restore.has_recovery());
+    let fresh = Workspace::from_restore(restore, true).unwrap();
+    assert_eq!(
+        fresh.map().editor.document.nodes[&fresh.map().editor.document.root].text,
+        "Central idea"
+    );
+}
+
+#[test]
+fn recovered_map_with_a_missing_original_can_save_to_a_new_destination() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut recovery =
+        branchline::recovery::RecoveryCoordinator::open(temp.path().join("recovery")).unwrap();
+    let mut workspace = Workspace::new();
+    let id = workspace.active_id();
+    let original = temp.path().join("missing.branchline");
+    workspace.save(id, &original).unwrap();
+    draft(&mut workspace, "Recovered work");
+    recovery.publish(&workspace.recovery_state()).unwrap();
+    std::fs::remove_file(&original).unwrap();
+    let mut restored = Workspace::from_restore(recovery.load().unwrap(), true).unwrap();
+    let destination = temp.path().join("recovered.branchline");
+    restored.save(id, &destination).unwrap();
+    assert!(!restored.map().editor.is_dirty());
+    assert!(!original.exists());
+    let document =
+        branchline::interchange::read_native(&std::fs::read(destination).unwrap()).unwrap();
+    assert_eq!(document.nodes[&document.root].text, "Recovered work");
 }

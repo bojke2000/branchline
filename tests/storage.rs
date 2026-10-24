@@ -3,7 +3,6 @@ use branchline::{
     storage::*,
 };
 use std::fs;
-use uuid::Uuid;
 
 #[test]
 fn publication_failure_preserves_original() {
@@ -20,32 +19,6 @@ fn publication_failure_preserves_original() {
     fs::create_dir(&directory).unwrap();
     assert!(atomic_write(&directory, b"bad").is_err());
     assert!(directory.is_dir());
-}
-
-#[test]
-fn recovery_lock_and_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = RecoveryStore::open(temp.path().into()).unwrap();
-    assert!(RecoveryStore::open(temp.path().into()).is_err());
-    let record = RecoveryRecord {
-        version: 1,
-        document_id: Uuid::new_v4().to_string(),
-        original_path: None,
-        document: Document::new("Recovered"),
-    };
-    store.write(&record).unwrap();
-    assert_eq!(store.load().unwrap().unwrap(), record);
-    assert!(store.discard("wrong").is_err());
-    let other = RecoveryRecord {
-        document_id: Uuid::new_v4().to_string(),
-        ..record.clone()
-    };
-    assert!(store.write(&other).is_err());
-    store.discard(&record.document_id).unwrap();
-    assert!(store.load().unwrap().is_none());
-    fs::write(temp.path().join("recovery.json"), b"broken").unwrap();
-    assert!(store.load().is_err());
-    assert!(temp.path().join("recovery.json").exists());
 }
 
 #[test]

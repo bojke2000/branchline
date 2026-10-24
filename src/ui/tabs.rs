@@ -48,11 +48,19 @@ impl NativeApp {
                         create = ui.button("+").on_hover_text("New mind map").clicked();
                     });
                 });
-                if self.workspace.pending_activation().is_some() && self.composing.is_some() {
+                if (self.workspace.pending_activation().is_some()
+                    || self.pending_close.is_some()
+                    || self.pending_quit)
+                    && self.composing.is_some()
+                {
                     ui.horizontal(|ui| {
-                        ui.label("Finish the current text composition to switch maps.");
-                        if ui.small_button("Cancel switch").clicked() {
+                        ui.label(
+                            "Finish the current text composition before changing tabs or closing.",
+                        );
+                        if ui.small_button("Cancel pending action").clicked() {
                             self.workspace.cancel_activation();
+                            self.pending_close = None;
+                            self.pending_quit = false;
                         }
                     });
                 }
@@ -80,7 +88,10 @@ impl NativeApp {
 
     pub(super) fn finish_tab_transition(&mut self, ctx: &egui::Context) {
         if let Some(owner) = self.composing {
-            if self.workspace.pending_activation().is_some() || self.pending_close.is_some() {
+            if self.workspace.pending_activation().is_some()
+                || self.pending_close.is_some()
+                || self.pending_quit
+            {
                 ctx.memory_mut(|memory| memory.request_focus(owner));
             }
             return;
@@ -89,18 +100,23 @@ impl NativeApp {
             return;
         }
         let original = self.workspace.active_id();
-        if let Some(id) = self.pending_close.take() {
-            let result = self.workspace.close_clean(id).map_err(EditorError::from);
-            if result.is_ok()
-                && let Some(widgets) = self.owned_widgets.remove(&id)
-            {
-                ctx.data_mut(|data| {
-                    for widget in widgets {
-                        data.remove::<egui::text_edit::TextEditState>(widget);
-                    }
-                });
+        let progress = if self.pending_quit {
+            self.pending_quit = false;
+            Some(self.workspace.request_quit())
+        } else {
+            self.pending_close
+                .take()
+                .map(|id| self.workspace.request_close(id))
+        };
+        if let Some(progress) = progress {
+            self.drive_transition(progress.map_err(EditorError::from), ctx);
+            if self.dialog.is_some() {
+                self.dialogs(ctx);
+                return;
             }
-            self.report(result);
+            if self.allow_close {
+                return;
+            }
         }
         if self.workspace.pending_activation().is_none() && original == self.workspace.active_id() {
             return;
@@ -110,42 +126,45 @@ impl NativeApp {
             .apply_pending_activation()
             .map_err(EditorError::from);
         if result.is_ok() {
-            ctx.memory_mut(|memory| {
-                if let Some(id) = memory.focused() {
-                    memory.surrender_focus(id);
-                }
-            });
-            self.drag = None;
-            self.palette_open = false;
-            self.edit_focus = None;
-            self.layout_revision = None;
-            self.layout_session = None;
-            self.galleys.clear();
-            self.branch_colors.clear();
-            self.placed = Layout::default();
-            self.input_after_switch = true;
+            self.reset_tab_renderer(ctx);
         }
         self.report(result);
     }
 
     pub(super) fn close_tab(&mut self, id: SessionId, _ctx: &egui::Context) {
-        let result = self
-            .workspace
-            .session(id)
-            .map_err(EditorError::from)
-            .and_then(|map| {
-                if map.editor.is_dirty() || map.editor.has_drafts()? {
-                    Ok(false)
-                } else {
-                    Ok(true)
-                }
-            });
-        match result {
-            Ok(true) => {
-                self.pending_close = Some(id);
+        if let Err(cause) = self.workspace.entry(id) {
+            self.error = Some(cause.to_string());
+            return;
+        }
+        self.cancel_canvas_drag();
+        if !self.pending_quit {
+            self.pending_close = Some(id);
+        }
+    }
+
+    pub(super) fn reset_tab_renderer(&mut self, ctx: &egui::Context) {
+        ctx.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
             }
-            Ok(false) => self.dialog = Some(Dialog::CloseTab(id)),
-            Err(error) => self.report(Err(error)),
+        });
+        self.drag = None;
+        self.palette_open = false;
+        self.edit_focus = None;
+        self.layout_revision = None;
+        self.layout_session = None;
+        self.galleys.clear();
+        self.branch_colors.clear();
+        self.placed = Layout::default();
+        self.input_after_switch = true;
+    }
+
+    pub(super) fn cancel_canvas_drag(&mut self) {
+        if let Some(CanvasDrag::Pan { initial_pan, .. }) = self.drag.take() {
+            match self.workspace.session_mut(self.workspace.active_id()) {
+                Ok(map) => map.viewport.pan = initial_pan,
+                Err(cause) => self.error = Some(format!("The pan owner is unavailable: {cause}")),
+            }
         }
     }
 }

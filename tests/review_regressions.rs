@@ -1,6 +1,6 @@
 use branchline::{
     app::{Direction, Editor, EditorAction},
-    storage::RecoveryStore,
+    recovery::RecoveryCoordinator,
     ui::NativeApp,
 };
 use eframe::egui;
@@ -38,7 +38,7 @@ fn key(app: &mut NativeApp, ctx: &egui::Context, key: egui::Key) {
 #[test]
 fn inline_creation_keeps_editing_reachable_beyond_the_viewport() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     for _ in 0..14 {
@@ -96,7 +96,7 @@ fn undoing_reveal_selects_a_visible_ancestor() {
 #[test]
 fn abandoning_ime_composition_releases_map_keyboard_ownership() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     key(&mut app, &ctx, egui::Key::F2);
@@ -136,7 +136,7 @@ fn abandoning_ime_composition_releases_map_keyboard_ownership() {
 #[test]
 fn cancelled_draft_is_removed_from_debounced_recovery() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     key(&mut app, &ctx, egui::Key::F2);
@@ -176,7 +176,7 @@ fn cancelled_draft_is_removed_from_debounced_recovery() {
 #[test]
 fn palette_ime_confirmation_does_not_dispatch_a_map_command() {
     let temp = tempfile::tempdir().unwrap();
-    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
     let ctx = egui::Context::default();
     render(&mut app, &ctx, vec![]);
     let modifiers = egui::Modifiers {
