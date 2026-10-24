@@ -79,6 +79,38 @@ fn new_tab_retains_source_drafts_and_view() {
 }
 
 #[test]
+fn palette_preserves_drafts_for_mermaid_export_and_cancel() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    key(&mut app, &ctx, Key::F2, Modifiers::NONE);
+    render(
+        &mut app,
+        &ctx,
+        vec![Event::Text("Uncommitted label".into())],
+    );
+    let before = app.workspace.map().editor.document.clone();
+    let generation = app.workspace.map().editor.history.generation;
+    key(&mut app, &ctx, Key::K, command());
+    render(&mut app, &ctx, vec![Event::Text("Export Mermaid".into())]);
+    assert_eq!(app.workspace.map().editor.document, before);
+    assert_eq!(app.workspace.map().editor.history.generation, generation);
+    assert_eq!(
+        app.workspace.map().editor.editing.as_ref().unwrap().text,
+        "Uncommitted label"
+    );
+    key(&mut app, &ctx, Key::Enter, Modifiers::NONE);
+    click_label(&mut app, &ctx, "Cancel");
+    assert_eq!(app.workspace.map().editor.document, before);
+    assert_eq!(app.workspace.map().editor.history.generation, generation);
+    assert_eq!(
+        app.workspace.map().editor.editing.as_ref().unwrap().text,
+        "Uncommitted label"
+    );
+}
+
+#[test]
 fn equal_node_ids_and_revisions_are_isolated() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();

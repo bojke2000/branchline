@@ -209,6 +209,38 @@ additional envelope for containers. The UI limits typed field length to
 262,144 characters; imported supported text may be larger within byte bounds.
 Oversized input produces an error, never silent truncation.
 
+## Mermaid export
+
+Choose **More > Export Mermaid...**, or find it in the command palette.
+The scope preview captures the active map, including unfinished labels and all
+folded descendants. Choose a UTF-8 `.mmd` destination; existing files require
+confirmation. Export preserves the native path, document, drafts, dirty state
+and undo history, even if another tab becomes active after capture. Open native
+map destinations, including same-file aliases, are rejected.
+
+This is **mindmap export only**, not Mermaid import or flowchart support.
+Generated identifiers are separate from labels. Quotes, punctuation, newlines,
+Unicode and emoji use numeric entities so text cannot become diagram syntax.
+Empty labels and control characters other than LF fail explicitly; nothing is
+written. Encoded output is bounded at 32 MiB before output allocation.
+Only labels, root, hierarchy and child order transfer; notes, links, IDs,
+formatting and BMM layout do not. Mermaid chooses presentation.
+
+Actual local Mermaid **12.2.0** parsing and parsed database hierarchy/order/label
+checks passed on synthetic hostile labels using Node **22.21.1** and jsdom
+**26.1.0**, with real sanitization and entity decoding. This does not establish
+rendered appearance or other Mermaid versions. Large exports may require a
+consumer to raise its own text-size/node limits. No user maps go to a remote
+renderer. Node is development-only, never a BMM runtime requirement.
+
+```sh
+npm ci --prefix tools/mermaid
+cargo test --test mermaid actual_mermaid_parser_roundtrip -- --ignored
+```
+
+Opening the command palette no longer commits drafts. It owns text input while
+open; selecting an editing command still uses that command's ordinary admission.
+
 ## Development and verification
 
 ```sh
@@ -240,7 +272,7 @@ on Escape, outside release or an intervening unsaved-changes dialog.
 
 Executed on this Mac: `cargo fmt --check` passed;
 `cargo clippy --all-targets -- -D warnings` passed;
-`cargo test --locked` passed (142 tests);
+`cargo test --locked` passed (148 tests; one optional parser test ignored);
 `cargo build --release --locked` and `sh scripts/bundle.sh` passed.
 These results do not establish the unverified native scenarios listed below.
 
@@ -307,10 +339,25 @@ unmeasured. No prefeature equivalent exists; these are channel comparisons,
 not a claimed historical speedup. Earlier tab measurements above remain the
 separately recorded tabs-stage measurements.
 
+Completed Mermaid exports additionally measure draft snapshot, bounded encoding,
+atomic write/flush, readback and independent source-order/depth/label assertions:
+
+| Nodes | First / warm median / warm p95 | Process elapsed / user / system | Peak family RSS |
+| --- | --- | --- | --- |
+| 100 | 6.489 / 3.935 / 5.345 ms | 0.31 / 0.01 / 0.02 s | 9,961,472 bytes |
+| 10,000 | 12.606 / 10.821 / 11.857 ms | 0.24 / 0.16 / 0.01 s | 26,804,224 bytes |
+
+Use `/usr/bin/time -l target/release/examples/benchmark mermaid 100`
+(also 10,000). Each process runs 21 samples, without children. Setup is outside
+workflow timers but inside process figures. First-use is not guaranteed cold;
+OS/cache/flush variation affects these samples. Optional Node parser costs,
+native save dialogs, rendering and agent tokens are unmeasured. There is no
+prefeature equivalent, so no historical speedup is claimed.
+
 An earlier pre-tabs macOS ARM64 BMM bundle was launched; its exact executable, launch time and
 1280x872 native window were observed, then the owned verification instance was
 closed. That established its window readiness, not interactive usability.
-The clipboard bundle was rebuilt but was not relaunched here, preserving any running
+The clipboard/Mermaid bundle was rebuilt but was not relaunched here, preserving any running
 application and unsaved maps.
 REA runtime screenshot
 and accessibility capture were blocked by missing macOS Screen Recording and

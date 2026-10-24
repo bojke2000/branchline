@@ -44,6 +44,12 @@ fn generated(count: usize) -> Document {
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|mode| mode == "mermaid") {
+        let count = args.get(2).expect("node count").parse().unwrap();
+        assert!([100, 1_000, 10_000].contains(&count));
+        mermaid_workflow(count);
+        return;
+    }
     if args
         .get(1)
         .is_some_and(|mode| matches!(mode.as_str(), "clipboard-rich" | "clipboard-plain"))
@@ -208,6 +214,63 @@ fn clipboard_workflow(count: usize, rich: bool) {
         } else {
             "select_copy_dual_parse_plain_paste_undo_redo"
         },
+        "nodes",
+        count,
+        times,
+    );
+}
+
+fn mermaid_workflow(count: usize) {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("measured.mmd");
+    let mut editor = Editor::from_document(generated(count), None, true, None).unwrap();
+    editor
+        .dispatch(branchline::app::EditorAction::Edit)
+        .unwrap();
+    editor.editing.as_mut().unwrap().text = "Unfinished benchmark".into();
+    let before = editor.document.clone();
+    let generation = editor.history.generation;
+    let mut expected = Vec::new();
+    let mut pending = vec![(before.root.as_str(), 1)];
+    while let Some((id, depth)) = pending.pop() {
+        let node = &before.nodes[id];
+        expected.push((node.text.clone(), depth));
+        pending.extend(
+            node.children
+                .iter()
+                .rev()
+                .map(|child| (child.as_str(), depth + 1)),
+        );
+    }
+    expected[0].0 = "Unfinished benchmark".into();
+    let mut times = Vec::new();
+    for _ in 0..21 {
+        let start = Instant::now();
+        let bytes =
+            branchline::mermaid::export_mermaid(&editor.snapshot_with_drafts().unwrap()).unwrap();
+        branchline::storage::atomic_write(&path, &bytes).unwrap();
+        assert_eq!(branchline::storage::read_bounded(&path).unwrap(), bytes);
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(text.lines().next(), Some("mindmap"));
+        assert_eq!(text.lines().count(), count + 1);
+        for (index, ((label, depth), line)) in expected.iter().zip(text.lines().skip(1)).enumerate()
+        {
+            assert_eq!(
+                line,
+                format!("{}bmm_{index}[\"{label}\"]", "  ".repeat(*depth))
+            );
+        }
+        assert_eq!(editor.document, before);
+        assert_eq!(editor.history.generation, generation);
+        assert!(editor.path.is_none());
+        assert_eq!(
+            editor.editing.as_ref().unwrap().text,
+            "Unfinished benchmark"
+        );
+        times.push(start.elapsed().as_secs_f64() * 1_000.0);
+    }
+    report(
+        "draft_snapshot_mermaid_atomic_write_readback",
         "nodes",
         count,
         times,

@@ -15,6 +15,7 @@ pub enum AppCommand {
     Save,
     SaveAs,
     Export,
+    ExportMermaid,
     Quit,
     AddChild,
     AddSibling,
@@ -76,6 +77,7 @@ pub const FILE_COMMANDS: &[AppCommand] = &[
     AppCommand::Save,
     AppCommand::SaveAs,
     AppCommand::Export,
+    AppCommand::ExportMermaid,
     AppCommand::Quit,
 ];
 pub const VIEW_COMMANDS: &[AppCommand] = &[
@@ -199,6 +201,7 @@ impl AppCommand {
             Save => ("Save", "Cmd/Ctrl+S", Some(Command(Key::S))),
             SaveAs => ("Save as...", "Cmd/Ctrl+Shift+S", Some(CommandShift(Key::S))),
             Export => ("Export Freeplane...", "", None),
+            ExportMermaid => ("Export Mermaid...", "", None),
             Quit => ("Quit BMM", "Cmd/Ctrl+Q", Some(Command(Key::Q))),
             AddChild => ("Add child", "Tab", Some(Plain(Key::Tab))),
             AddSibling => ("Add sibling", "Enter", Some(Plain(Key::Enter))),

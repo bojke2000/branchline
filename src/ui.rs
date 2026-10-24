@@ -33,6 +33,10 @@ enum Dialog {
     Recovery,
     Import,
     Delete(DeletionPlan),
+    MermaidExport {
+        session: SessionId,
+        bytes: Vec<u8>,
+    },
     Overwrite {
         session: SessionId,
         path: PathBuf,
@@ -41,6 +45,8 @@ enum Dialog {
 }
 
 mod details;
+#[cfg(test)]
+mod mermaid_tests;
 mod paste;
 mod recovery;
 mod tabs;
@@ -249,6 +255,21 @@ impl NativeApp {
             AppCommand::Save => self.save_file(false, ctx),
             AppCommand::SaveAs => self.save_file(true, ctx),
             AppCommand::Export => self.export_file(ctx),
+            AppCommand::ExportMermaid => {
+                let session = self.workspace.active_id();
+                let result = self
+                    .workspace
+                    .session(session)
+                    .map_err(EditorError::from)
+                    .and_then(|map| map.editor.snapshot_with_drafts())
+                    .and_then(|document| {
+                        crate::mermaid::export_mermaid(&document).map_err(EditorError::from)
+                    });
+                match result {
+                    Ok(bytes) => self.dialog = Some(Dialog::MermaidExport { session, bytes }),
+                    Err(error) => self.error = Some(error.to_string()),
+                }
+            }
             AppCommand::Quit => self.queue_quit(),
             AppCommand::Search => self.open_search(),
             AppCommand::Palette => self.open_palette(),
@@ -434,6 +455,7 @@ impl NativeApp {
                     let commands = [
                         AppCommand::SaveAs,
                         AppCommand::Export,
+                        AppCommand::ExportMermaid,
                         AppCommand::Theme,
                         AppCommand::Help,
                     ];
@@ -598,18 +620,29 @@ impl NativeApp {
                         .set_file_name("Ideas.mm")
                         .save_file()
                 {
-                    if path.exists() {
-                        self.dialog = Some(Dialog::Overwrite {
-                            session: self.workspace.active_id(),
-                            path,
-                            export: Some(report.bytes),
-                        });
-                    } else {
-                        self.publish(self.workspace.active_id(), path, Some(report.bytes), ctx);
-                    }
+                    self.stage_export(self.workspace.active_id(), Some(path), report.bytes, ctx);
                 }
             }
             Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    fn stage_export(
+        &mut self,
+        session: SessionId,
+        path: Option<PathBuf>,
+        bytes: Vec<u8>,
+        ctx: &egui::Context,
+    ) {
+        let Some(path) = path else { return };
+        if path.exists() {
+            self.dialog = Some(Dialog::Overwrite {
+                session,
+                path,
+                export: Some(bytes),
+            });
+        } else {
+            self.publish(session, path, Some(bytes), ctx);
         }
     }
 
@@ -647,6 +680,26 @@ impl NativeApp {
             )
             .show(root_ui, |ui| self.toolbar(ui, blocked));
         self.tab_strip(root_ui, blocked);
+        let palette_events = if self.palette_open {
+            ctx.input_mut(|input| {
+                let (text, other) = std::mem::take(&mut input.events)
+                    .into_iter()
+                    .partition::<Vec<_>, _>(|event| {
+                        matches!(
+                            event,
+                            egui::Event::Text(_)
+                                | egui::Event::Paste(_)
+                                | egui::Event::Copy
+                                | egui::Event::Cut
+                                | egui::Event::Ime(_)
+                        )
+                    });
+                input.events = other;
+                text
+            })
+        } else {
+            Vec::new()
+        };
         if self.dialog.is_some() {
             ctx.input_mut(|input| {
                 input.events.retain(|event| {
@@ -709,8 +762,11 @@ impl NativeApp {
             self.details_panel(root_ui);
         }
         egui::CentralPanel::default().show(root_ui, |ui| {
-            ui.add_enabled_ui(self.dialog.is_none(), |ui| self.canvas(ui));
+            ui.add_enabled_ui(self.dialog.is_none() && !self.palette_open, |ui| {
+                self.canvas(ui)
+            });
         });
+        ctx.input_mut(|input| input.events.extend(palette_events));
         if !blocked {
             self.palette(&ctx);
         }
@@ -807,13 +863,9 @@ impl NativeApp {
     }
 
     fn open_palette(&mut self) {
-        let result = self.prepare();
-        if result.is_ok() {
-            self.palette_open = true;
-            self.palette_query.clear();
-            self.palette_focus = true;
-        }
-        self.report(result);
+        self.palette_open = true;
+        self.palette_query.clear();
+        self.palette_focus = true;
     }
 
     fn open_search(&mut self) {
@@ -832,7 +884,7 @@ impl NativeApp {
             ui.horizontal(|ui| {
                 ui.label("Find an idea");
                 let response = ui.add_enabled(
-                    self.dialog.is_none(),
+                    self.dialog.is_none() && !self.palette_open,
                     egui::TextEdit::singleline(&mut self.workspace.map_mut().search.query)
                         .id(Id::unique(("search", session)))
                         .hint_text("Search text and notes")
@@ -1775,6 +1827,18 @@ impl NativeApp {
         egui::Modal::new(Id::unique("file-dialog")).show(ctx, |ui| {
             ui.set_width(470.0);
             match &mut dialog {
+                Dialog::MermaidExport { session, bytes } => {
+                    ui.heading("Export Mermaid mindmap");
+                    ui.label("Exports the captured labels and complete hierarchy, including unfinished text and folded topics. Notes, links, IDs, styling and BMM layout do not transfer. Mermaid determines presentation; the native map and its edit history stay unchanged.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Choose .mmd file...").clicked() {
+                            keep = false;
+                            let path = rfd::FileDialog::new().add_filter("Mermaid mindmap", &["mmd"]).set_file_name("Ideas.mmd").save_file();
+                            self.stage_export(*session, path, std::mem::take(bytes), ctx);
+                        }
+                        if ui.button("Cancel").clicked() { keep = false; }
+                    });
+                }
                 Dialog::Paste(pending) => { keep = self.paste_dialog(ui, pending); }
                 Dialog::CopyOutline(copy) => { keep = self.copy_dialog(ui, copy); }
                 Dialog::CloseDecision(id) => {

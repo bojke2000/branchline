@@ -21,7 +21,7 @@ impl NativeApp {
         let mut commit = false;
         let mut switch_owner = false;
         let retained_owner = details.id != self.workspace.map().editor.selected;
-        let enabled = self.dialog.is_none();
+        let enabled = self.dialog.is_none() && !self.palette_open;
         egui::Panel::right("notes").default_size(290.0).min_size(220.0).show(ui, |ui| {
             ui.add_space(12.0);
             ui.heading("A little more context");
@@ -81,6 +81,8 @@ impl NativeApp {
         if commit
             && !retained_owner
             && self.dialog.is_none()
+            && !self.palette_open
+            && !egui::Popup::is_any_open(ui.ctx())
             && self.workspace.pending_activation().is_none()
             && self.pending_close.is_none()
             && !self.pending_quit
