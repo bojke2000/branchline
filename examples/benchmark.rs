@@ -1,6 +1,10 @@
 use branchline::{
+    app::{DraftField, Editor, EditorAction, EditorEdit},
     document::{Command, Document, History, MovePlacement, Node, Side},
     layout::layout,
+    recovery::{RecoveryCoordinator, RestoreContent},
+    session::{MapSession, SessionId},
+    workspace::Workspace,
 };
 use std::{collections::BTreeMap, time::Instant};
 
@@ -38,6 +42,17 @@ fn generated(count: usize) -> Document {
 }
 
 fn main() {
+    let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|mode| mode == "one-map") {
+        edit_workflow();
+        return;
+    }
+    if args.get(1).is_some_and(|mode| mode == "tabs") {
+        let count: usize = args.get(2).expect("tab count").parse().unwrap();
+        assert!([2, 5, 10].contains(&count));
+        tabs_workflow(count);
+        return;
+    }
     for count in [100, 1_000, 10_000] {
         let mut doc = generated(count);
         let mut history = History::default();
@@ -58,7 +73,7 @@ fn main() {
             std::hint::black_box(layout(&doc, &sizes).unwrap());
             times.push(start.elapsed().as_secs_f64() * 1_000.0);
         }
-        report("edit_layout", count, times);
+        report("edit_layout", "nodes", count, times);
         history = History::default();
         let mut times = Vec::new();
         for index in 0..21 {
@@ -77,15 +92,131 @@ fn main() {
             std::hint::black_box(layout(&doc, &sizes).unwrap());
             times.push(start.elapsed().as_secs_f64() * 1_000.0);
         }
-        report("move_layout", count, times);
+        report("move_layout", "nodes", count, times);
     }
 }
 
-fn report(operation: &str, count: usize, mut times: Vec<f64>) {
+fn edit_workflow() {
+    let mut workspace = Workspace::new();
+    workspace.map_mut().editor = Editor::from_document(generated(1_000), None, true, None).unwrap();
+    let id = workspace.active_id();
+    let root = workspace.map().editor.selected.clone();
+    let mut times = Vec::new();
+    for sample in 0..21 {
+        let expected = format!("Completed edit {sample}");
+        let start = Instant::now();
+        workspace
+            .apply(id, EditorEdit::Action(EditorAction::Edit))
+            .unwrap();
+        workspace
+            .apply(
+                id,
+                EditorEdit::SetDraft {
+                    field: DraftField::Inline(root.clone()),
+                    text: expected.clone(),
+                },
+            )
+            .unwrap();
+        workspace.apply(id, EditorEdit::CommitDrafts).unwrap();
+        workspace
+            .apply(id, EditorEdit::Action(EditorAction::Undo))
+            .unwrap();
+        workspace
+            .apply(id, EditorEdit::Action(EditorAction::Redo))
+            .unwrap();
+        assert_eq!(workspace.active_id(), id);
+        assert_eq!(workspace.map().editor.document.nodes[&root].text, expected);
+        assert!(workspace.map().editor.editing.is_none());
+        times.push(start.elapsed().as_secs_f64() * 1_000.0);
+    }
+    report("completed_edit_undo_redo", "nodes", 1_000, times);
+}
+
+fn tabs_workflow(count: usize) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut recovery = RecoveryCoordinator::open(directory.path().into()).unwrap();
+    let mut workspace = Workspace::new();
+    workspace.map_mut().editor = Editor::from_document(generated(1_000), None, true, None).unwrap();
+    let mut ids = vec![workspace.active_id()];
+    for _ in 1..count {
+        let mut map = MapSession::new_blank(SessionId::new());
+        map.editor = Editor::from_document(generated(1_000), None, true, None).unwrap();
+        ids.push(workspace.insert_session(map).unwrap());
+    }
+    let mut times = Vec::new();
+    for sample in 0..21 {
+        let start = Instant::now();
+        for (index, id) in ids.iter().copied().enumerate() {
+            workspace.request_activate(id).unwrap();
+            workspace.apply_pending_activation().unwrap();
+            workspace
+                .apply(id, EditorEdit::Action(EditorAction::Edit))
+                .unwrap();
+            let root = workspace.map().editor.selected.clone();
+            workspace
+                .apply(
+                    id,
+                    EditorEdit::SetDraft {
+                        field: DraftField::Inline(root),
+                        text: format!("Map {index}, sample {sample}"),
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(workspace.active_id(), *ids.last().unwrap());
+        for (index, id) in ids.iter().copied().enumerate() {
+            assert_eq!(
+                workspace
+                    .session(id)
+                    .unwrap()
+                    .editor
+                    .editing
+                    .as_ref()
+                    .unwrap()
+                    .text,
+                format!("Map {index}, sample {sample}")
+            );
+        }
+        assert!(
+            recovery
+                .publish(&workspace.recovery_state())
+                .unwrap()
+                .cleanup_error
+                .is_none()
+        );
+        let restore = recovery.load().unwrap();
+        assert_eq!(restore.active, ids.last().copied());
+        for (index, restored) in restore.sessions.iter().enumerate() {
+            let RestoreContent::Recovered(document) = &restored.content else {
+                panic!("expected recovered draft");
+            };
+            assert_eq!(
+                document.nodes[&document.root].text,
+                format!("Map {index}, sample {sample}")
+            );
+        }
+        let restored = Workspace::from_restore(restore, true).unwrap();
+        assert_eq!(restored.order(), ids);
+        assert_eq!(restored.active_id(), *ids.last().unwrap());
+        for (index, id) in ids.iter().copied().enumerate() {
+            let map = restored.session(id).unwrap();
+            assert_eq!(
+                map.editor.document.nodes[&map.editor.document.root].text,
+                format!("Map {index}, sample {sample}")
+            );
+            assert!(map.editor.is_dirty());
+        }
+        drop(restored);
+        times.push(start.elapsed().as_secs_f64() * 1_000.0);
+    }
+    report("switch_drafts_publish_restore", "maps", count, times);
+}
+
+fn report(operation: &str, dimension: &str, count: usize, mut times: Vec<f64>) {
     let first = times.remove(0);
     times.sort_by(f64::total_cmp);
     println!(
-        "operation={operation} nodes={count} first_sample_ms={first:.3} warm_n=20 median_ms={:.3} p95_ms={:.3}",
+        "operation={operation} {dimension}={count} first_sample_ms={first:.3} warm_n=20 median_ms={:.3} p95_ms={:.3}",
         times[10], times[18]
     );
     if count == 1_000 {

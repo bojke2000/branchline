@@ -53,6 +53,8 @@ Import always previews compatibility and never edits the source file.
 | Cmd+Z / Cmd+Shift+Z | Undo / redo |
 | Cmd+K / Cmd+F | Command palette / search labels and notes |
 | Cmd+N / Cmd+O / Cmd+S | New / open / save |
+| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous mind-map tab |
+| Cmd/Ctrl+W | Close the targeted map tab with unsaved-work protection |
 | Cmd+Shift+S | Save as |
 | Cmd+Q | Quit with unsaved-change protection |
 | Drag blank canvas | Pan |
@@ -173,6 +175,10 @@ cargo test --locked
 cargo build --release --locked
 cargo run --release --example benchmark
 /usr/bin/time -l target/release/examples/benchmark
+/usr/bin/time -l target/release/examples/benchmark one-map
+/usr/bin/time -l target/release/examples/benchmark tabs 2
+/usr/bin/time -l target/release/examples/benchmark tabs 5
+/usr/bin/time -l target/release/examples/benchmark tabs 10
 ```
 
 The tests cover semantic edits/history, invalid graphs, XML loss warnings,
@@ -191,35 +197,55 @@ on Escape, outside release or an intervening unsaved-changes dialog.
 
 Executed on this Mac: `cargo fmt --check` passed;
 `cargo clippy --all-targets -- -D warnings` passed;
-`cargo test --locked` passed (54 integration tests);
+`cargo test --locked` passed (102 integration tests and 3 unit tests);
 `cargo build --release --locked` and `sh scripts/bundle.sh` passed.
 These results do not establish the unverified native scenarios listed below.
 
-Measured on this development Mac, optimized generated-map operations plus layout:
+Measured completed workflows on this development Mac in release mode, with
+1,000 generated nodes per map and 21 samples per process:
 
-| Operation | Nodes | First sample | Warm median (20) | Warm p95 |
+| Workflow | Maps | First sample | Warm median (20) | Warm p95 |
 | --- | --- | --- | --- | --- |
-| Text edit + layout | 100 | 0.309 ms | 0.192 ms | 0.236 ms |
-| Text edit + layout | 1,000 | 2.797 ms | 1.545 ms | 2.288 ms |
-| Text edit + layout | 10,000 | 11.500 ms | 11.175 ms | 11.446 ms |
-| Subtree move + layout | 100 | 0.244 ms | 0.190 ms | 0.300 ms |
-| Subtree move + layout | 1,000 | 1.372 ms | 1.162 ms | 1.283 ms |
-| Subtree move + layout | 10,000 | 13.022 ms | 12.173 ms | 12.530 ms |
+| Edit, commit, Undo, Redo: pre-tabs `c39b19c` | 1 | 1.801 ms | 1.274 ms | 1.752 ms |
+| Edit, commit, Undo, Redo: admitted workspace | 1 | 2.296 ms | 1.491 ms | 1.765 ms |
+| Switch each tab, edit drafts, publish, reload and restore | 2 | 17.312 ms | 20.025 ms | 22.888 ms |
+| Same completed switch/recovery workflow | 5 | 35.398 ms | 41.496 ms | 43.578 ms |
+| Same completed switch/recovery workflow | 10 | 57.390 ms | 74.498 ms | 77.820 ms |
 
-The sampled process used 0.80 s elapsed, 0.57 s user CPU and 0.01 s system
-CPU, with maximum resident size 62,717,952 bytes. Edit and move phases use
-separate histories; the old history is released before starting the next phase.
-The benchmark process had no children; this is not UI renderer memory.
-First samples are not guaranteed cold OS-cache measurements. Rendering, text
-measurement, drag hit-testing, selection reconciliation, dialogs and real
-interaction are excluded. The additional move phase means whole-process totals
-are not equivalent to the earlier edit-only benchmark.
-There is no equivalent Freeplane benchmark or
-agent-token measurement, so no relative speed/context claim is made.
+Every sample asserts the final active identity, every draft label, all restored
+documents and dirty state before reporting. The equivalent one-map comparison
+uses the old Editor entry points versus the new admitted Workspace entry
+points, with the same generated input and completed edit/undo/redo sequence.
+The workspace warm median was 0.217 ms slower in these samples (about 17%):
+admission/isolation is additional work, not an established speed improvement.
+There is no pre-tabs multi-map recovery equivalent.
 
-The macOS ARM64 BMM bundle was launched; its exact executable, launch time and
+Whole-process measurements include setup and all 21 samples, not only timed
+workflow bodies:
+
+| Workflow | Elapsed | User CPU | System CPU | Peak process-family RSS |
+| --- | --- | --- | --- | --- |
+| Pre-tabs one-map baseline | 0.69 s | 0.03 s | 0.00 s | 16,744,448 bytes |
+| Admitted one-map editing | 0.36 s | 0.03 s | 0.00 s | 17,629,184 bytes |
+| Two-map switch/recovery | 0.42 s | 0.10 s | 0.03 s | 26,624,000 bytes |
+| Five-map switch/recovery | 0.87 s | 0.25 s | 0.05 s | 52,346,880 bytes |
+| Ten-map switch/recovery | 1.57 s | 0.49 s | 0.09 s | 95,584,256 bytes |
+
+The processes had no children, so their peak RSS is also process-family peak
+RSS, not UI renderer memory. First samples separate first use from 20 warm
+samples; they are not guaranteed cold OS/filesystem-cache measurements.
+The tab scenario includes real local snapshot writes, file flushing, manifest
+publication, cleanup, parsing and rehydration. It excludes the intentional
+700 ms idle delay, renderer/text layout, native focus/IME, dialogs and human
+interaction. The default benchmark still measures document edit/move plus
+layout separately. No Freeplane comparison or agent-token measurement was
+performed; lower whole-process launch time is not a workflow speedup claim.
+
+An earlier pre-tabs macOS ARM64 BMM bundle was launched; its exact executable, launch time and
 1280x872 native window were observed, then the owned verification instance was
-closed. This establishes window readiness, not interactive usability.
+closed. That established its window readiness, not interactive usability.
+The tabs bundle was rebuilt but was not relaunched here, preserving any running
+application and unsaved maps.
 REA runtime screenshot
 and accessibility capture were blocked by missing macOS Screen Recording and
 Accessibility permissions; no permission settings were changed or bypassed.
