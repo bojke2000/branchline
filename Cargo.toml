@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cssparser = "0.38.0"
 directories = "6.0.0"
 eframe = "0.37.0"
 fs2 = "0.4.3"
+html5ever = "0.40.1"
 quick-xml = "0.42.0"
 rfd = "0.17.2"
 same-file = "1.0.6"

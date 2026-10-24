@@ -1,3 +1,7 @@
+use branchline::outline_format::{
+    ClipboardPayload, OutlineFormat, OutlineWarningKind, PasteInterpretation, parse_clipboard,
+    serialize_outline,
+};
 use branchline::{
     app::{DraftField, EditorAction, EditorEdit},
     document::{Command, MAX_DEPTH, MAX_FIELD_BYTES, MAX_NODES, MAX_TEXT_BYTES},
@@ -6,6 +10,309 @@ use branchline::{
     workspace::{PasteTarget, Workspace},
 };
 use std::collections::BTreeSet;
+
+fn ready(payload: ClipboardPayload) -> OutlineForest {
+    match parse_clipboard(&payload).unwrap() {
+        PasteInterpretation::Ready(parsed) => parsed.forest,
+        other => panic!("Expected unambiguous hierarchy, got {other:?}"),
+    }
+}
+
+#[test]
+fn html_and_plain_copy_have_equivalent_hierarchy() {
+    let expected = OutlineForest {
+        roots: vec![
+            node(
+                "Plan & ideas",
+                vec![node("Résumé 🚀", vec![]), node("", vec![])],
+            ),
+            node("Next", vec![]),
+        ],
+    };
+    for payload in [
+        ClipboardPayload {
+            html: Some(include_str!("fixtures/clipboard/nested.html").into()),
+            plain: None,
+        },
+        ClipboardPayload {
+            html: None,
+            plain: Some("- Plan & ideas\n\t- Résumé 🚀\n\t- \n- Next".into()),
+        },
+        ClipboardPayload {
+            html: None,
+            plain: Some("1. Plan & ideas\n  * Résumé 🚀\n  * \n2. Next".into()),
+        },
+        ClipboardPayload {
+            html: None,
+            plain: Some("- Plan & ideas\n    - Résumé 🚀\n    - \n- Next".into()),
+        },
+    ] {
+        assert_eq!(ready(payload), expected);
+    }
+    let copy = serialize_outline(&expected).unwrap();
+    assert!(copy.warnings.is_empty());
+    assert_eq!(
+        copy.payload.plain.as_deref(),
+        Some("- Plan & ideas\n\t- Résumé 🚀\n\t- \n- Next\n")
+    );
+    assert_eq!(ready(copy.payload.clone()), expected);
+    assert_eq!(
+        ready(ClipboardPayload {
+            plain: copy.payload.plain,
+            html: None
+        }),
+        expected
+    );
+}
+
+#[test]
+fn office_list_levels_are_source_facts() {
+    let report = parse_clipboard(&ClipboardPayload {
+        html: Some(include_str!("fixtures/clipboard/office.html").into()),
+        plain: None,
+    })
+    .unwrap();
+    let PasteInterpretation::Ready(parsed) = report else {
+        panic!("supported Office metadata should be unambiguous")
+    };
+    assert_eq!(parsed.source, OutlineFormat::OfficeHtml);
+    assert_eq!(
+        parsed.forest,
+        OutlineForest {
+            roots: vec![
+                node(
+                    "Plan & ideas",
+                    vec![node("Résumé 🚀", vec![]), node("", vec![])]
+                ),
+                node("Next", vec![])
+            ]
+        }
+    );
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .all(|warning| warning.category == OutlineWarningKind::IgnoredContent)
+    );
+}
+
+#[test]
+fn html_wrappers_do_not_become_topics_and_item_blocks_keep_line_breaks() {
+    assert_eq!(
+        ready(ClipboardPayload {
+            plain: None,
+            html: Some("<div><p>A</p><p>B</p></div>".into()),
+        }),
+        OutlineForest {
+            roots: vec![node("A", vec![]), node("B", vec![])]
+        }
+    );
+    assert_eq!(
+        ready(ClipboardPayload {
+            plain: None,
+            html: Some("<ul><li><p>A</p><p>B</p></li></ul>".into()),
+        }),
+        OutlineForest {
+            roots: vec![node("A\nB", vec![])]
+        }
+    );
+}
+
+#[test]
+fn html_fragment_scripts_and_escaped_office_css_are_parsed_offline() {
+    assert_eq!(ready(ClipboardPayload {
+        plain: None, html: Some("<p>Outside</p><!--StartFragment--><li>A<ul><li>B</ul><!--EndFragment--><p>Outside</p>".into()),
+    }), OutlineForest { roots: vec![node("A", vec![node("B", vec![])])] });
+    assert_eq!(ready(ClipboardPayload {
+        plain: None, html: Some(r#"<p style="mso-list:l0 lev\65l1 lfo1">A</p><p style="mso-list:l0 lev\65l2 lfo1"><span style="mso-list:Ignore">•</span>B<script>window.location="https://invalid.example";</script></p>"#.into()),
+    }), OutlineForest { roots: vec![node("A", vec![node("B", vec![])])] });
+    let many = "<p class=MsoListParagraph>A</p>".repeat(64);
+    let PasteInterpretation::Preview(candidates) = parse_clipboard(&ClipboardPayload {
+        plain: None,
+        html: Some(many),
+    })
+    .unwrap() else {
+        panic!("unsupported class metadata must be disclosed")
+    };
+    let warning = &candidates[0].warnings[0];
+    assert_eq!(warning.count, 64);
+    assert_eq!(warning.locations.len(), 8);
+}
+
+#[test]
+fn ambiguous_outline_requires_preview() {
+    for payload in [
+        ClipboardPayload {
+            plain: Some("- A\n  - B\n      - C".into()),
+            html: None,
+        },
+        ClipboardPayload {
+            plain: Some("- A\n\t- B\n    - C".into()),
+            html: None,
+        },
+        ClipboardPayload {
+            plain: None,
+            html: Some("<p class=MsoListParagraph>A</p><p class=MsoListParagraph>B</p>".into()),
+        },
+        ClipboardPayload {
+            plain: None,
+            html: Some("<p>Intro</p><ul><li>A</li></ul>".into()),
+        },
+        ClipboardPayload {
+            plain: Some("- A\n- B".into()),
+            html: Some("<ul><li>A<ul><li>B</li></ul></li></ul>".into()),
+        },
+    ] {
+        let PasteInterpretation::Preview(candidates) = parse_clipboard(&payload).unwrap() else {
+            panic!("ambiguous hierarchy must not silently import")
+        };
+        assert!(!candidates.is_empty() && candidates.len() <= 2);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| !candidate.warnings.is_empty())
+        );
+        assert!(
+            candidates
+                .iter()
+                .flat_map(|candidate| &candidate.warnings)
+                .all(|warning| warning.locations.len() <= 8)
+        );
+    }
+}
+
+#[test]
+fn skipped_office_levels_keep_same_level_siblings_in_the_preview() {
+    let payload = ClipboardPayload { plain: None, html: Some(
+        "<p style='mso-list:l0 level1 lfo1'>A</p><p style='mso-list:l0 level3 lfo1'>B</p><p style='mso-list:l0 level3 lfo1'>C</p>".into()
+    ) };
+    let PasteInterpretation::Preview(choices) = parse_clipboard(&payload).unwrap() else {
+        panic!("missing Office levels require preview")
+    };
+    assert_eq!(
+        choices[0].forest,
+        OutlineForest {
+            roots: vec![node("A", vec![node("B", vec![]), node("C", vec![])])]
+        }
+    );
+}
+
+#[test]
+fn rich_multiline_labels_survive_and_plain_normalization_is_disclosed() {
+    let forest = OutlineForest {
+        roots: vec![node("  First\nSecond\r<&\"", vec![node("  ", vec![])])],
+    };
+    let copy = serialize_outline(&forest).unwrap();
+    assert!(
+        copy.warnings
+            .iter()
+            .any(|warning| warning.category == OutlineWarningKind::RepresentationLoss)
+    );
+    assert_eq!(
+        ready(ClipboardPayload {
+            html: copy.payload.html.clone(),
+            plain: None
+        }),
+        forest
+    );
+    let PasteInterpretation::Preview(choices) = parse_clipboard(&copy.payload).unwrap() else {
+        panic!("lossy plain alternative must not hide its disagreement")
+    };
+    assert_eq!(choices[0].forest, forest);
+    assert_eq!(choices[1].forest.roots[0].label, "  First Second <&\"");
+}
+
+#[test]
+fn invalid_plain_alternatives_retain_the_reason_in_a_rich_preview() {
+    let payload = ClipboardPayload {
+        html: Some("<ul><li>A</li></ul>".into()),
+        plain: Some("x".repeat(MAX_FIELD_BYTES + 1)),
+    };
+    let PasteInterpretation::Preview(choices) = parse_clipboard(&payload).unwrap() else {
+        panic!("an invalid alternative must not disappear")
+    };
+    assert_eq!(choices[0].forest.roots[0].label, "A");
+    assert!(choices[0].warnings.iter().any(|warning| {
+        warning
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("1 MiB"))
+    }));
+}
+
+#[test]
+fn malformed_html_and_unfinished_fragments_are_not_presented_as_preserved() {
+    for html in [
+        "<ul><li>A</wrong></ul>",
+        "<!--StartFragment--><ul><li>A</li></ul>",
+        "<ul><li>A &unknown;</li></ul>",
+    ] {
+        let PasteInterpretation::Preview(candidates) = parse_clipboard(&ClipboardPayload {
+            plain: None,
+            html: Some(html.into()),
+        })
+        .unwrap() else {
+            panic!("recovered malformed structure requires review: {html}");
+        };
+        assert_eq!(candidates[0].forest.roots[0].children.len(), 0);
+        assert!(
+            candidates[0]
+                .warnings
+                .iter()
+                .any(|warning| warning.category == OutlineWarningKind::RepresentationLoss)
+        );
+    }
+}
+
+#[test]
+fn copy_expansion_is_checked_before_allocation() {
+    use branchline::document::MAX_FILE_BYTES;
+    let mut forest = OutlineForest {
+        roots: vec![node("", vec![]); 16],
+    };
+    let empty = serialize_outline(&forest).unwrap().payload;
+    let overhead = empty.plain.unwrap().len() + empty.html.unwrap().len();
+    let mut remaining = MAX_FILE_BYTES - overhead;
+    if remaining % 2 == 1 {
+        forest.roots[0].label.push('<');
+        remaining -= 5;
+    }
+    let mut fill = remaining / 2;
+    for root in &mut forest.roots {
+        let bytes = fill.min(MAX_FIELD_BYTES - root.label.len());
+        root.label.extend(std::iter::repeat_n('x', bytes));
+        fill -= bytes;
+    }
+    assert_eq!(fill, 0);
+    let output = serialize_outline(&forest).unwrap().payload;
+    assert_eq!(
+        output.plain.unwrap().len() + output.html.unwrap().len(),
+        MAX_FILE_BYTES
+    );
+    assert!(forest.roots[0].label.starts_with('<'));
+    forest.roots[0].label.replace_range(..1, "&");
+    assert!(serialize_outline(&forest).is_err());
+    let line = format!("- {}\n", "x".repeat(MAX_FIELD_BYTES - 3));
+    let mut plain = line.repeat(MAX_FILE_BYTES / line.len());
+    assert_eq!(plain.len(), MAX_FILE_BYTES);
+    assert_eq!(
+        ready(ClipboardPayload {
+            plain: Some(plain.clone()),
+            html: None
+        })
+        .roots
+        .len(),
+        32
+    );
+    plain.push(' ');
+    assert!(
+        parse_clipboard(&ClipboardPayload {
+            plain: Some(plain),
+            html: None
+        })
+        .is_err()
+    );
+}
 
 fn node(label: &str, children: Vec<OutlineNode>) -> OutlineNode {
     OutlineNode {

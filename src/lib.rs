@@ -7,6 +7,7 @@ pub mod file_identity;
 pub mod interchange;
 pub mod layout;
 pub mod outline;
+pub mod outline_format;
 pub mod recovery;
 pub mod session;
 pub mod storage;
