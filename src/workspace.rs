@@ -1,8 +1,11 @@
 use crate::{
-    app::EditorEdit,
+    app::{EditorEdit, PreparedEdit},
+    file_identity::{FileIdentity, FileIdentityState, OpenedFile},
+    interchange::{ImportReport, read_native},
     session::{MapSession, SessionId, SessionState},
+    storage::atomic_write_opened,
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -120,31 +123,153 @@ impl Workspace {
             .editor
             .prepare(&edit)
             .map_err(|error| WorkspaceError(error.to_string()))?;
-        let growth =
-            self.estimated_bytes() - session.editor.estimated_bytes() + prepared.estimated_bytes();
+        let next_stamp = self.admit_edit(id, &prepared)?;
+        self.commit_edit(id, prepared, next_stamp);
+        Ok(())
+    }
+
+    fn admit_edit(&self, id: SessionId, prepared: &PreparedEdit) -> Result<u64, WorkspaceError> {
+        let growth = self.estimated_bytes() - self.session(id)?.editor.estimated_bytes()
+            + prepared.estimated_bytes();
         if growth > self.storage_limit {
             return Err(WorkspaceError(
                 "Workspace storage capacity exceeded; the previous map and drafts were retained."
                     .into(),
             ));
         }
-        let next_stamp = self
-            .next_stamp
+        self.next_stamp
             .checked_add(prepared.history_entries())
-            .ok_or_else(|| WorkspaceError("History retention stamp capacity exceeded.".into()))?;
+            .ok_or_else(|| WorkspaceError("History retention stamp capacity exceeded.".into()))
+    }
+
+    fn commit_edit(&mut self, id: SessionId, prepared: PreparedEdit, next_stamp: u64) {
         let stamp = self.next_stamp;
-        let session = self.session_mut(id)?;
+        let session = self.session_mut(id).expect("admitted session");
         session.editor.commit_prepared(prepared, stamp);
         if session.editor.revision != 0
             || session
                 .editor
                 .has_drafts()
-                .map_err(|error| WorkspaceError(error.to_string()))?
+                .expect("prepared draft owners are valid")
         {
             session.pristine_blank = false;
         }
         self.next_stamp = next_stamp;
         self.enforce_history_budget();
+    }
+
+    pub fn destination_owner(&self, path: &Path) -> Result<Option<SessionId>, WorkspaceError> {
+        let destination = match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                Some(FileIdentity::open(path).map_err(|error| WorkspaceError(error.to_string()))?)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(WorkspaceError(format!("{}: {error}", path.display()))),
+        };
+        for (id, entry) in &self.entries {
+            let SessionState::Map(map) = entry else {
+                continue;
+            };
+            let Some(selected) = &map.editor.path else {
+                continue;
+            };
+            let loaded = match &map.file_identity {
+                FileIdentityState::Known(identity) => identity,
+                FileIdentityState::Unresolved(reason) => {
+                    return Err(WorkspaceError(reason.clone()));
+                }
+                FileIdentityState::Unsaved => {
+                    return Err(WorkspaceError(format!(
+                        "{}: Saved-file identity is unresolved.",
+                        selected.display()
+                    )));
+                }
+            };
+            let current =
+                FileIdentity::open(selected).map_err(|error| WorkspaceError(error.to_string()))?;
+            if &current != loaded {
+                return Err(WorkspaceError(format!(
+                    "{}: This file was replaced outside BMM. Its open tab was retained; resolve the changed file before overwriting or opening it again.",
+                    selected.display()
+                )));
+            }
+            if destination.as_ref() == Some(loaded) {
+                return Ok(Some(*id));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn open_native(&mut self, file: OpenedFile) -> Result<SessionId, WorkspaceError> {
+        let current = FileIdentity::open(&file.selected_path)
+            .map_err(|error| WorkspaceError(error.to_string()))?;
+        if current != file.identity {
+            return Err(WorkspaceError(
+                "The selected file changed while it was being opened; no tab was added.".into(),
+            ));
+        }
+        if let Some(owner) = self.destination_owner(&file.selected_path)? {
+            self.request_activate(owner)?;
+            return Ok(owner);
+        }
+        let document =
+            read_native(&file.bytes).map_err(|error| WorkspaceError(error.to_string()))?;
+        let mut map = MapSession::new_blank(SessionId::new());
+        map.editor
+            .replace_document(document, Some(file.selected_path), true, None)
+            .map_err(|error| WorkspaceError(error.to_string()))?;
+        map.file_identity = FileIdentityState::Known(file.identity);
+        self.insert_session(map)
+    }
+
+    pub fn accept_import(&mut self, report: ImportReport) -> Result<SessionId, WorkspaceError> {
+        let mut map = MapSession::new_blank(SessionId::new());
+        map.editor
+            .replace_document(report.document, None, false, None)
+            .map_err(|error| WorkspaceError(error.to_string()))?;
+        self.insert_session(map)
+    }
+
+    pub fn save(&mut self, id: SessionId, path: &Path) -> Result<(), WorkspaceError> {
+        if self
+            .destination_owner(path)?
+            .is_some_and(|owner| owner != id)
+        {
+            return Err(WorkspaceError(
+                "Another open tab owns this destination. Choose a different file.".into(),
+            ));
+        }
+        let save = self
+            .session(id)?
+            .editor
+            .prepare_save(path)
+            .map_err(|error| WorkspaceError(error.to_string()))?;
+        let next_stamp = self.admit_edit(id, &save.edit)?;
+        let published = atomic_write_opened(path, &save.bytes)
+            .map_err(|error| WorkspaceError(error.to_string()))?;
+        let identity = FileIdentity::from_file(published).and_then(|published| {
+            if FileIdentity::open(path)? == published {
+                Ok(published)
+            } else {
+                Err(crate::storage::StorageError(
+                    "The saved destination was replaced before its identity could be confirmed."
+                        .into(),
+                ))
+            }
+        });
+        self.commit_edit(id, save.edit, next_stamp);
+        match identity {
+            Ok(identity) => {
+                self.session_mut(id)?.file_identity = FileIdentityState::Known(identity)
+            }
+            Err(error) => {
+                let reason = format!(
+                    "The map was saved, but its new file identity could not be verified: {error}"
+                );
+                self.session_mut(id)?.file_identity = FileIdentityState::Unresolved(reason.clone());
+                return Err(WorkspaceError(reason));
+            }
+        }
         Ok(())
     }
 

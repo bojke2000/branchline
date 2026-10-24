@@ -3,6 +3,7 @@ mod appearance;
 pub mod commands;
 pub mod document;
 mod drag;
+pub mod file_identity;
 pub mod interchange;
 pub mod layout;
 pub mod session;

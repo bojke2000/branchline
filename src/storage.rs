@@ -18,6 +18,10 @@ fn failure(path: &Path, cause: impl std::fmt::Display) -> StorageError {
 
 pub fn read_bounded(path: &Path) -> Result<Vec<u8>, StorageError> {
     let file = File::open(path).map_err(|e| failure(path, e))?;
+    read_opened_bounded(path, &file)
+}
+
+pub(crate) fn read_opened_bounded(path: &Path, file: &File) -> Result<Vec<u8>, StorageError> {
     if file.metadata().map_err(|e| failure(path, e))?.len() > MAX_FILE_BYTES as u64 {
         return Err(failure(path, "File exceeds 32 MiB"));
     }
@@ -32,6 +36,10 @@ pub fn read_bounded(path: &Path) -> Result<Vec<u8>, StorageError> {
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+    atomic_write_opened(path, bytes).map(|_| ())
+}
+
+pub(crate) fn atomic_write_opened(path: &Path, bytes: &[u8]) -> Result<File, StorageError> {
     if bytes.len() > MAX_FILE_BYTES {
         return Err(failure(path, "File exceeds 32 MiB"));
     }
@@ -44,10 +52,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
         .as_file()
         .sync_all()
         .map_err(|e| failure(path, e))?;
-    temporary
-        .persist(path)
-        .map_err(|e| failure(path, e.error))?;
-    Ok(())
+    temporary.persist(path).map_err(|e| failure(path, e.error))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

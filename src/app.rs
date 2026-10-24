@@ -58,8 +58,6 @@ pub enum EditorAction {
 }
 #[derive(Clone, Debug)]
 pub enum PendingAction {
-    New,
-    Open(PathBuf),
     Quit,
 }
 
@@ -106,6 +104,11 @@ pub struct PreparedEdit {
     estimated_bytes: usize,
     original_serial: u64,
     history_entries: u64,
+}
+
+pub struct PreparedSave {
+    pub(crate) edit: PreparedEdit,
+    pub(crate) bytes: Vec<u8>,
 }
 
 impl PreparedEdit {
@@ -169,6 +172,19 @@ impl Editor {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    pub fn prepare_save(&self, path: &Path) -> Result<PreparedSave, EditorError> {
+        let mut edit = self.prepare(&EditorEdit::CommitDrafts)?;
+        let PreparedKind::Editor(candidate) = &mut edit.kind else {
+            unreachable!("draft commit prepares a complete editor");
+        };
+        let bytes = write_native(&candidate.document)?;
+        candidate.path = Some(path.into());
+        candidate.checkpoint.mark_saved(&candidate.document);
+        candidate.dirty = false;
+        edit.estimated_bytes = candidate.estimated_bytes();
+        Ok(PreparedSave { edit, bytes })
     }
 
     pub fn estimated_bytes(&self) -> usize {

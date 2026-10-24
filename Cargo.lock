@@ -480,6 +480,7 @@ dependencies = [
  "fs2",
  "quick-xml 0.42.0",
  "rfd",
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",

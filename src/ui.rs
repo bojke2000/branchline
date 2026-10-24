@@ -3,9 +3,10 @@ use crate::{
     app::{DraftField, EditorAction, EditorEdit, EditorError, EditorKey, PendingAction},
     appearance,
     commands::{self, AppCommand, FILE_COMMANDS, NAVIGATION_COMMANDS, VIEW_COMMANDS},
-    document::{Command, DeletionPlan, Document, MovePlacement, NodeId},
+    document::{Command, DeletionPlan, MovePlacement, NodeId},
     drag::DragSession,
-    interchange::{export_mm, import_mm, read_native},
+    file_identity::read_identified,
+    interchange::{ImportReport, export_mm, import_mm},
     layout::{self, Layout, Point, Rect, Size},
     session::{SessionId, Viewport},
     storage::{RecoveryRecord, RecoveryStore, StorageError, atomic_write, read_bounded},
@@ -31,6 +32,7 @@ enum Dialog {
     Import,
     Delete(DeletionPlan),
     Overwrite {
+        session: SessionId,
         path: PathBuf,
         export: Option<Vec<u8>>,
     },
@@ -68,6 +70,7 @@ pub struct NativeApp {
     input_after_switch: bool,
     owned_widgets: BTreeMap<SessionId, HashSet<Id>>,
     pending_close: Option<SessionId>,
+    pending_import: Option<ImportReport>,
 }
 
 impl NativeApp {
@@ -103,6 +106,7 @@ impl NativeApp {
             input_after_switch: false,
             owned_widgets: BTreeMap::new(),
             pending_close: None,
+            pending_import: None,
         })
     }
 
@@ -110,6 +114,18 @@ impl NativeApp {
         if let Err(error) = result {
             self.error = Some(error.to_string());
         }
+    }
+
+    pub fn stage_import(&mut self, report: ImportReport) -> Result<(), EditorError> {
+        report.document.validate()?;
+        if self.dialog.is_some() {
+            return Err(EditorError::State(
+                "Finish the current dialog before staging another import.".into(),
+            ));
+        }
+        self.pending_import = Some(report);
+        self.dialog = Some(Dialog::Import);
+        Ok(())
     }
 
     pub fn checkpoint_recovery(&mut self) -> Result<(), EditorError> {
@@ -434,37 +450,6 @@ impl NativeApp {
         };
         let result = (|| -> Result<(), EditorError> {
             match action {
-                PendingAction::New => {
-                    self.clear_recovery()?;
-                    self.workspace.map_mut().editor.replace_document(
-                        Document::new("Central idea"),
-                        None,
-                        true,
-                        None,
-                    )?;
-                    self.reset_view();
-                }
-                PendingAction::Open(path) => {
-                    let bytes = read_bounded(&path)?;
-                    if path
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("mm"))
-                    {
-                        let report = import_mm(&bytes)?;
-                        self.workspace.map_mut().editor.stage_import(report);
-                        self.dialog = Some(Dialog::Import);
-                    } else {
-                        let document = read_native(&bytes)?;
-                        self.clear_recovery()?;
-                        self.workspace.map_mut().editor.replace_document(
-                            document,
-                            Some(path),
-                            true,
-                            None,
-                        )?;
-                        self.reset_view();
-                    }
-                }
                 PendingAction::Quit => {
                     self.clear_recovery()?;
                     self.workspace.map_mut().editor.pending = None;
@@ -480,20 +465,34 @@ impl NativeApp {
         self.report(result);
     }
 
-    fn open_file(&mut self, ctx: &egui::Context) {
+    fn open_file(&mut self, _ctx: &egui::Context) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Mind maps", &["branchline", "mm"])
             .pick_file()
         {
-            self.request(PendingAction::Open(path), ctx);
+            let result = if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("mm"))
+            {
+                read_bounded(&path)
+                    .map_err(EditorError::from)
+                    .and_then(|bytes| self.stage_import(import_mm(&bytes)?))
+            } else {
+                read_identified(&path)
+                    .map_err(EditorError::from)
+                    .and_then(|file| {
+                        self.workspace
+                            .open_native(file)
+                            .map(|_| ())
+                            .map_err(EditorError::from)
+                    })
+            };
+            self.report(result);
         }
     }
 
     fn save_file(&mut self, save_as: bool, ctx: &egui::Context) {
-        if let Err(error) = self.prepare() {
-            self.error = Some(error.to_string());
-            return;
-        }
+        let session = self.workspace.active_id();
         let path = if save_as || self.workspace.map().editor.path.is_none() {
             rfd::FileDialog::new()
                 .add_filter("BMM mind map", &["branchline"])
@@ -504,22 +503,36 @@ impl NativeApp {
         };
         if let Some(path) = path {
             if path.exists() {
-                self.dialog = Some(Dialog::Overwrite { path, export: None });
+                self.dialog = Some(Dialog::Overwrite {
+                    session,
+                    path,
+                    export: None,
+                });
             } else {
-                self.publish(path, None, ctx);
+                self.publish(session, path, None, ctx);
             }
         }
     }
 
-    fn publish(&mut self, path: PathBuf, export: Option<Vec<u8>>, ctx: &egui::Context) {
+    fn publish(
+        &mut self,
+        session: SessionId,
+        path: PathBuf,
+        export: Option<Vec<u8>>,
+        ctx: &egui::Context,
+    ) {
         let is_export = export.is_some();
         let result = if let Some(bytes) = export {
-            atomic_write(&path, &bytes).map_err(EditorError::from)
+            self.workspace.destination_owner(&path).map_err(EditorError::from).and_then(|owner| {
+                if owner.is_some() {
+                    return Err(EditorError::State("Export cannot overwrite an open native mind map. Choose a different destination.".into()));
+                }
+                atomic_write(&path, &bytes).map_err(EditorError::from)
+            })
         } else {
             self.workspace
-                .map_mut()
-                .editor
-                .save_to(&path)
+                .save(session, &path)
+                .map_err(EditorError::from)
                 .and_then(|_| self.clear_recovery())
         };
         match result {
@@ -559,11 +572,12 @@ impl NativeApp {
                 {
                     if path.exists() {
                         self.dialog = Some(Dialog::Overwrite {
+                            session: self.workspace.active_id(),
                             path,
                             export: Some(report.bytes),
                         });
                     } else {
-                        self.publish(path, Some(report.bytes), ctx);
+                        self.publish(self.workspace.active_id(), path, Some(report.bytes), ctx);
                     }
                 }
             }
@@ -1199,7 +1213,7 @@ impl NativeApp {
             .editing
             .as_ref()
             .and_then(|buffer| {
-                if inline_composing {
+                if inline_composing || !ui.is_enabled() {
                     return None;
                 }
                 let key = ui.input(|input| {
@@ -1321,6 +1335,7 @@ impl NativeApp {
                     self.report(result);
                 }
                 if !inline_composing
+                    && ui.is_enabled()
                     && edit_key.is_none()
                     && response.lost_focus()
                     && !first_focus
@@ -1736,7 +1751,7 @@ impl NativeApp {
                 Dialog::Import => {
                     ui.heading("Import Freeplane map");
                     ui.label("Original files stay untouched. The imported document saves as BMM JSON (.branchline).");
-                    if let Some(report) = &self.workspace.map().editor.staged_import {
+                    if let Some(report) = &self.pending_import {
                         if report.warnings.is_empty() { ui.label("No unsupported fields detected within this supported subset."); }
                         else {
                             ui.colored_label(Color32::from_rgb(210, 140, 60), "These fields will not be carried into the new document:");
@@ -1750,11 +1765,11 @@ impl NativeApp {
                     }
                     ui.horizontal(|ui| {
                         if ui.button("Accept supported data").clicked() {
-                            let result = self.clear_recovery().and_then(|_| self.workspace.map_mut().editor.accept_import());
-                            if result.is_ok() { keep = false; self.reset_view(); }
+                            let result = self.pending_import.clone().ok_or_else(|| EditorError::State("No import preview is staged.".into())).and_then(|report| self.workspace.accept_import(report).map(|_| ()).map_err(EditorError::from));
+                            if result.is_ok() { keep = false; self.pending_import = None; }
                             self.report(result);
                         }
-                        if ui.button("Cancel").clicked() { keep = false; self.workspace.map_mut().editor.cancel_import(); }
+                        if ui.button("Cancel").clicked() { keep = false; self.pending_import = None; }
                     });
                 }
                 Dialog::Delete(plan) => {
@@ -1774,12 +1789,12 @@ impl NativeApp {
                         if ui.button("Cancel").clicked() { keep = false; }
                     });
                 }
-                Dialog::Overwrite { path, export } => {
+                Dialog::Overwrite { session, path, export } => {
                     ui.heading("Replace this file?");
                     ui.label(path.display().to_string());
                     ui.label("The existing file will be atomically replaced after the new data is written.");
                     ui.horizontal(|ui| {
-                        if ui.button("Replace file").clicked() { keep = false; self.publish(path.clone(), export.clone(), ctx); }
+                        if ui.button("Replace file").clicked() { keep = false; self.publish(*session, path.clone(), export.clone(), ctx); }
                         if ui.button("Cancel").clicked() {
                             keep = false;
                             if self.workspace.map().editor.pending.is_some() { self.dialog = Some(Dialog::Unsaved); }

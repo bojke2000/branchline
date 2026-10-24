@@ -19,6 +19,7 @@ pub struct ImportWarning {
     pub locations: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct ImportReport {
     pub document: Document,
     pub warnings: Vec<ImportWarning>,

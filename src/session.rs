@@ -1,5 +1,6 @@
 use crate::{
     app::Editor,
+    file_identity::FileIdentityState,
     layout::{Point, Rect, Size},
 };
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,7 @@ pub struct MapSession {
     pub viewport: Viewport,
     pub search: SearchState,
     pub notes_open: bool,
+    pub file_identity: FileIdentityState,
     pub(crate) pristine_blank: bool,
 }
 
@@ -105,6 +107,7 @@ impl MapSession {
             viewport: Viewport::default(),
             search: SearchState::default(),
             notes_open: false,
+            file_identity: FileIdentityState::Unsaved,
             pristine_blank: true,
         }
     }

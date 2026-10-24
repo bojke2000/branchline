@@ -159,3 +159,190 @@ fn maximum_supported_map_opens_beside_pristine_blank() {
     assert!(workspace.session(blank).unwrap().is_pristine_blank());
     assert!(workspace.estimated_bytes() <= 256 * 1024 * 1024);
 }
+
+#[test]
+fn opening_same_file_focuses_existing_tab() {
+    use branchline::{
+        document::Document, file_identity::read_identified, interchange::write_native,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("original.branchline");
+    std::fs::write(&path, write_native(&Document::new("Loaded")).unwrap()).unwrap();
+    let mut workspace = Workspace::new();
+    let opened = workspace
+        .open_native(read_identified(&path).unwrap())
+        .unwrap();
+    workspace.apply_pending_activation().unwrap();
+    assert_eq!(workspace.map().editor.path.as_ref(), Some(&path));
+    let alias = temp.path().join("alias.branchline");
+    std::fs::hard_link(&path, &alias).unwrap();
+    assert_eq!(
+        workspace
+            .open_native(read_identified(&alias).unwrap())
+            .unwrap(),
+        opened
+    );
+    assert_eq!(workspace.len(), 2);
+    assert_eq!(
+        workspace.session(opened).unwrap().editor.path.as_ref(),
+        Some(&path)
+    );
+    #[cfg(unix)]
+    {
+        let symlink = temp.path().join("symlink.branchline");
+        std::os::unix::fs::symlink(&path, &symlink).unwrap();
+        assert_eq!(
+            workspace
+                .open_native(read_identified(&symlink).unwrap())
+                .unwrap(),
+            opened
+        );
+    }
+    assert!(read_identified(temp.path()).is_err());
+    assert!(read_identified(&temp.path().join("missing")).is_err());
+}
+
+#[test]
+fn save_as_rejects_another_tabs_destination() {
+    use branchline::{
+        document::Document, file_identity::read_identified, interchange::write_native,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("owned.branchline");
+    let bytes = write_native(&Document::new("Owner")).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let mut workspace = Workspace::new();
+    let blank = workspace.active_id();
+    let owner = workspace
+        .open_native(read_identified(&path).unwrap())
+        .unwrap();
+    assert_eq!(workspace.destination_owner(&path).unwrap(), Some(owner));
+    assert!(workspace.save(blank, &path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(workspace.session(blank).unwrap().editor.path.is_none());
+}
+
+#[test]
+fn external_replacement_refreshes_identity() {
+    use branchline::{
+        document::{Command, Document},
+        file_identity::read_identified,
+        interchange::{read_native, write_native},
+        storage::atomic_write,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("map.branchline");
+    std::fs::write(&path, write_native(&Document::new("Before")).unwrap()).unwrap();
+    let mut workspace = Workspace::new();
+    let id = workspace
+        .open_native(read_identified(&path).unwrap())
+        .unwrap();
+    let root = workspace.session(id).unwrap().editor.selected.clone();
+    workspace
+        .apply(
+            id,
+            EditorEdit::Command(Command::SetText {
+                id: root,
+                text: "After save".into(),
+            }),
+        )
+        .unwrap();
+    workspace.save(id, &path).unwrap();
+    assert_eq!(
+        workspace
+            .open_native(read_identified(&path).unwrap())
+            .unwrap(),
+        id
+    );
+    let bytes = std::fs::read(&path).unwrap();
+    let document = read_native(&bytes).unwrap();
+    assert_eq!(document.nodes[&document.root].text, "After save");
+    let captured = read_identified(&path).unwrap();
+    atomic_write(
+        &path,
+        &write_native(&Document::new("External replacement")).unwrap(),
+    )
+    .unwrap();
+    assert!(workspace.open_native(captured).is_err());
+    assert!(
+        workspace
+            .open_native(read_identified(&path).unwrap())
+            .is_err()
+    );
+    assert_eq!(workspace.len(), 2);
+}
+
+#[test]
+fn import_acceptance_adds_dirty_tab_and_retains_source_drafts() {
+    use branchline::interchange::import_mm;
+    let mut workspace = Workspace::new();
+    let id = workspace.active_id();
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::Edit))
+        .unwrap();
+    let node = workspace.map().editor.selected.clone();
+    workspace
+        .apply(
+            id,
+            EditorEdit::SetDraft {
+                field: DraftField::Inline(node),
+                text: "Original draft".into(),
+            },
+        )
+        .unwrap();
+    let before = workspace.map().editor.document.clone();
+    assert_eq!(workspace.len(), 1);
+    assert_eq!(workspace.map().editor.document, before);
+    assert_eq!(
+        workspace.map().editor.editing.as_ref().unwrap().text,
+        "Original draft"
+    );
+    let report = import_mm(br#"<map><node TEXT="Imported"/></map>"#).unwrap();
+    let imported = workspace.accept_import(report).unwrap();
+    assert_eq!(workspace.len(), 2);
+    assert!(workspace.session(imported).unwrap().editor.is_dirty());
+    assert_eq!(
+        workspace
+            .session(id)
+            .unwrap()
+            .editor
+            .editing
+            .as_ref()
+            .unwrap()
+            .text,
+        "Original draft"
+    );
+}
+
+#[test]
+fn failed_save_retains_uncommitted_drafts_and_checkpoint() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut workspace = Workspace::new();
+    let session = workspace.active_id();
+    workspace
+        .apply(session, EditorEdit::Action(EditorAction::Edit))
+        .unwrap();
+    let root = workspace.map().editor.selected.clone();
+    workspace
+        .apply(
+            session,
+            EditorEdit::SetDraft {
+                field: DraftField::Inline(root),
+                text: "Do not lose the draft".into(),
+            },
+        )
+        .unwrap();
+    let before = workspace.map().editor.document.clone();
+    assert!(
+        workspace
+            .save(session, &temp.path().join("missing-parent/map.branchline"))
+            .is_err()
+    );
+    assert_eq!(workspace.map().editor.document, before);
+    assert!(!workspace.map().editor.is_dirty());
+    assert_eq!(
+        workspace.map().editor.editing.as_ref().unwrap().text,
+        "Do not lose the draft"
+    );
+    assert!(workspace.map().editor.path.is_none());
+}

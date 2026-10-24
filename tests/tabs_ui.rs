@@ -296,3 +296,68 @@ fn closing_a_clean_tab_releases_its_text_widget_state() {
     assert!(app.workspace.session(old).is_err());
     assert!(egui::TextEdit::load_state(&ctx, widget).is_none());
 }
+
+#[test]
+fn import_cancel_adds_no_tab_and_retains_drafts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryStore::open(temp.path().into()).unwrap()).unwrap();
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    key(&mut app, &ctx, Key::F2, Modifiers::NONE);
+    render(
+        &mut app,
+        &ctx,
+        vec![Event::Text("Keep original draft".into())],
+    );
+    let source = app.workspace.active_id();
+    let before = app.workspace.map().editor.document.clone();
+    let report = || {
+        branchline::interchange::import_mm(
+            br#"<map><node TEXT="Imported"><node TEXT="Child"/></node></map>"#,
+        )
+        .unwrap()
+    };
+    fn position(shapes: &[egui::Shape], label: &str) -> Option<egui::Pos2> {
+        shapes.iter().find_map(|shape| match shape {
+            egui::Shape::Text(text) if text.galley.job.text == label => {
+                Some(text.pos + text.galley.size() * 0.5)
+            }
+            egui::Shape::Vec(children) => position(children, label),
+            _ => None,
+        })
+    }
+    for label in ["Cancel", "Accept supported data"] {
+        app.stage_import(report()).unwrap();
+        render(&mut app, &ctx, vec![]);
+        let shapes = render(&mut app, &ctx, vec![]);
+        let pos = position(&shapes, label).expect("import dialog action");
+        for pressed in [true, false] {
+            render(
+                &mut app,
+                &ctx,
+                vec![
+                    Event::PointerMoved(pos),
+                    Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        if label == "Cancel" {
+            assert_eq!(app.workspace.len(), 1);
+        }
+    }
+    assert_eq!(app.workspace.len(), 2);
+    assert_ne!(app.workspace.active_id(), source);
+    let original = app.workspace.session(source).unwrap();
+    assert_eq!(original.editor.document, before);
+    assert_eq!(
+        original.editor.editing.as_ref().unwrap().text,
+        "Keep original draft"
+    );
+    assert!(app.workspace.map().editor.is_dirty());
+    assert!(app.workspace.map().editor.path.is_none());
+}

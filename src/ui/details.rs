@@ -67,7 +67,11 @@ impl NativeApp {
             }
             ui.weak("Notes are plain text. No scripts or formulas run.");
         });
-        if commit && self.workspace.pending_activation().is_none() && self.pending_close.is_none() {
+        if commit
+            && self.dialog.is_none()
+            && self.workspace.pending_activation().is_none()
+            && self.pending_close.is_none()
+        {
             let result = self.edit(EditorEdit::FlushDetails);
             self.report(result);
         }
