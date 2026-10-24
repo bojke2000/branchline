@@ -2,9 +2,10 @@ use branchline::{
     app::{DraftField, Editor, EditorAction, EditorEdit},
     document::{Command, Document, History, MovePlacement, Node, Side},
     layout::layout,
+    outline_format::{PasteInterpretation, parse_clipboard, serialize_outline},
     recovery::{RecoveryCoordinator, RestoreContent},
     session::{MapSession, SessionId},
-    workspace::Workspace,
+    workspace::{PasteTarget, Workspace},
 };
 use std::{collections::BTreeMap, time::Instant};
 
@@ -43,6 +44,15 @@ fn generated(count: usize) -> Document {
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
+    if args
+        .get(1)
+        .is_some_and(|mode| matches!(mode.as_str(), "clipboard-rich" | "clipboard-plain"))
+    {
+        let count = args.get(2).expect("node count").parse().unwrap();
+        assert!([100, 1_000, 10_000].contains(&count));
+        clipboard_workflow(count, args[1] == "clipboard-rich");
+        return;
+    }
     if args.get(1).is_some_and(|mode| mode == "one-map") {
         edit_workflow();
         return;
@@ -130,6 +140,78 @@ fn edit_workflow() {
         times.push(start.elapsed().as_secs_f64() * 1_000.0);
     }
     report("completed_edit_undo_redo", "nodes", 1_000, times);
+}
+
+fn clipboard_workflow(count: usize, rich: bool) {
+    let mut source = Editor::from_document(generated(count), None, true, None).unwrap();
+    let mut times = Vec::new();
+    for _ in 0..21 {
+        let mut destination = Workspace::new();
+        let id = destination.active_id();
+        let before = destination.map().editor.document.clone();
+        let target = PasteTarget::Append {
+            session: id,
+            node: before.root.clone(),
+            revision: destination.map().editor.revision,
+        };
+        let start = Instant::now();
+        source.select_all();
+        let forest = source.copy_forest().unwrap();
+        let mut copy = serialize_outline(&forest).unwrap();
+        assert!(copy.warnings.is_empty());
+        if !rich {
+            copy.payload.html = None;
+        }
+        let PasteInterpretation::Ready(parsed) = parse_clipboard(&copy.payload).unwrap() else {
+            panic!("generated single-line hierarchy must round-trip unambiguously");
+        };
+        destination.paste_outline(target, parsed.forest).unwrap();
+        let document = &destination.map().editor.document;
+        assert_eq!(document.nodes.len(), count);
+        document.validate().unwrap();
+        let mut pending = vec![(source.document.root.as_str(), document.root.as_str(), 1)];
+        let mut visited = 0;
+        let mut max_depth = 0;
+        while let Some((original, copied, depth)) = pending.pop() {
+            let original = &source.document.nodes[original];
+            let copied = &document.nodes[copied];
+            assert_eq!(copied.text, original.text);
+            assert_eq!(copied.children.len(), original.children.len());
+            assert!(!source.document.nodes.contains_key(&copied.id));
+            pending.extend(
+                original
+                    .children
+                    .iter()
+                    .zip(&copied.children)
+                    .map(|(left, right)| (left.as_str(), right.as_str(), depth + 1)),
+            );
+            visited += 1;
+            max_depth = max_depth.max(depth);
+        }
+        assert_eq!(visited, count);
+        assert!(max_depth > 1 && max_depth <= branchline::document::MAX_DEPTH);
+        let pasted = document.clone();
+        destination
+            .apply(id, EditorEdit::Action(EditorAction::Undo))
+            .unwrap();
+        assert_eq!(destination.map().editor.document, before);
+        destination
+            .apply(id, EditorEdit::Action(EditorAction::Redo))
+            .unwrap();
+        assert_eq!(destination.map().editor.document, pasted);
+        assert!(destination.map().editor.is_dirty());
+        times.push(start.elapsed().as_secs_f64() * 1_000.0);
+    }
+    report(
+        if rich {
+            "select_copy_dual_parse_rich_paste_undo_redo"
+        } else {
+            "select_copy_dual_parse_plain_paste_undo_redo"
+        },
+        "nodes",
+        count,
+        times,
+    );
 }
 
 fn tabs_workflow(count: usize) {

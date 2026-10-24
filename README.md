@@ -49,6 +49,9 @@ Import always previews compatibility and never edits the source file.
 | Shift+Up / Shift+Down (or Alt+Up / Alt+Down) | Reorder among visible siblings on the same side |
 | Alt+Right / Alt+Left | Indent under preceding sibling / outdent |
 | Shift+click | Add/remove a node from the selection |
+| Ctrl/Cmd+A | Select the entire map, including root and folded descendants |
+| Ctrl/Cmd+C / Ctrl/Cmd+V | Copy selected hierarchies / paste an outline |
+| Ctrl/Cmd+Shift+V | Paste an outline as a new map tab |
 | Delete / Backspace | Delete selected branches; multi-selection and nonempty subtrees require one confirmation |
 | Cmd+Z / Cmd+Shift+Z | Undo / redo |
 | Cmd+K / Cmd+F | Command palette / search labels and notes |
@@ -97,6 +100,46 @@ the selected subtrees, without counting overlapping selections twice, and one
 undo restores the deletion. If the central root is included, the confirmation
 explicitly says it will be kept. Other commands operate on the active node;
 dragging selects and moves only the grabbed branch, not the whole group.
+
+### Hierarchical clipboard
+
+Physical Ctrl and Cmd both work for A/C/V on macOS. Text fields keep their
+ordinary local clipboard behavior. Whole-map selection includes hidden nodes;
+Delete retains the root and confirms removal of its descendants. Copy includes
+selected subtrees in document order, without duplicating overlapping selections.
+
+Copy publishes tab-indented bullets and escaped nested HTML lists. Paste supports
+plain bullets/numbered outlines, nested HTML lists and inline Office `mso-list`
+levels. It transfers labels/order/hierarchy, not IDs, notes, links or folding.
+Multiline/leading-whitespace plain-text losses warn before copy. Ambiguous
+indentation, unsupported Office metadata, malformed HTML or disagreeing
+representations require an explicit preview; errors do not silently flatten maps.
+Synthetic Office fixtures are not proof of Word/OneNote interoperability.
+
+Paste appends below the selected topic and unfolds it. An untouched blank map
+is replaced instead. One top-level topic becomes its root; a forest receives a
+“Pasted ideas” root. Paste as new map always creates a tab. Each paste is one
+Undo step; unrelated unfinished notes remain with their original topic.
+History steps that would orphan unfinished notes are rejected explicitly.
+
+Bounds are 100,000 nodes, depth 256, 1 MiB per field, 64 MiB decoded text and
+32 MiB combined clipboard formats, including encoding expansion. Preview shows
+only the first 200 topics/160 characters per label, but inserts the full admitted
+outline. Admission preserves workspace/history bounds.
+
+macOS reads text/HTML from exactly one pasteboard item, checking its generation
+and native UTF-8 lengths before Rust copies. Initial OS/library allocations
+are not bounded by that check. Publication uses one dual-format library call,
+then verifies both representations; the library clears before writing, so a
+failed publication can lose the previous clipboard and is not rollback-safe.
+Other platforms currently read plain text only, with an explicit limitation
+preview; their native behavior is unverified. No clipboard monitoring occurs.
+Native clipboard races, actual Word/OneNote/editor round trips and native IME
+were not exercised. Tests inject a transport and never overwrite your clipboard.
+
+Save existing maps and quit the running app normally before opening the rebuilt
+`target/bundle/BMM.app`; a second instance cannot acquire its workspace lock.
+The build does not quit or relaunch your running app.
 
 ## Documents and safety
 
@@ -197,7 +240,7 @@ on Escape, outside release or an intervening unsaved-changes dialog.
 
 Executed on this Mac: `cargo fmt --check` passed;
 `cargo clippy --all-targets -- -D warnings` passed;
-`cargo test --locked` passed (102 integration tests and 3 unit tests);
+`cargo test --locked` passed (142 tests);
 `cargo build --release --locked` and `sh scripts/bundle.sh` passed.
 These results do not establish the unverified native scenarios listed below.
 
@@ -241,10 +284,33 @@ interaction. The default benchmark still measures document edit/move plus
 layout separately. No Freeplane comparison or agent-token measurement was
 performed; lower whole-process launch time is not a workflow speedup claim.
 
+Clipboard measurements use release-mode production select/copy, dual-format
+serialization, parsing, admitted blank-map replacement, structural assertions,
+Undo and Redo. Both channels produce the same independently checked labels,
+child order and depth; the plain channel simulates an editor retaining only
+the plain representation after BMM's dual-format copy.
+
+| Channel / nodes | First / warm median / warm p95 | Process elapsed / user / system | Peak family RSS |
+| --- | --- | --- | --- |
+| Rich / 100 | 1.275 / 0.747 / 0.930 ms | 0.23 / 0.02 / 0.00 s | 10,371,072 bytes |
+| Rich / 10,000 | 53.166 / 49.014 / 49.672 ms | 1.06 / 0.91 / 0.14 s | 35,569,664 bytes |
+| Plain / 100 | 0.263 / 0.206 / 0.216 ms | 0.00 / 0.00 / 0.00 s | 10,190,848 bytes |
+| Plain / 10,000 | 28.077 / 26.986 / 27.466 ms | 0.60 / 0.45 / 0.14 s | 34,701,312 bytes |
+
+Reproduce with `cargo build --release --locked --example benchmark`, then
+`/usr/bin/time -l target/release/examples/benchmark clipboard-rich 100`
+(also `clipboard-plain`, and 10,000 nodes). Each process runs 21 samples;
+workflow timers exclude fixture/workspace setup, process figures include it.
+The first sample is first-use, not guaranteed OS-cold. No child processes run.
+The native clipboard, renderer, external applications and agent tokens are
+unmeasured. No prefeature equivalent exists; these are channel comparisons,
+not a claimed historical speedup. Earlier tab measurements above remain the
+separately recorded tabs-stage measurements.
+
 An earlier pre-tabs macOS ARM64 BMM bundle was launched; its exact executable, launch time and
 1280x872 native window were observed, then the owned verification instance was
 closed. That established its window readiness, not interactive usability.
-The tabs bundle was rebuilt but was not relaunched here, preserving any running
+The clipboard bundle was rebuilt but was not relaunched here, preserving any running
 application and unsaved maps.
 REA runtime screenshot
 and accessibility capture were blocked by missing macOS Screen Recording and
