@@ -80,9 +80,7 @@ pub enum PasteInterpretation {
     Preview(Vec<ParsedOutline>),
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct FormatError(pub String);
+pub use crate::interchange::FormatError;
 
 pub struct OutlineCopy {
     pub payload: ClipboardPayload,
@@ -852,7 +850,7 @@ impl TextSink {
             .bytes
             .checked_add(text.len())
             .filter(|bytes| *bytes <= self.limit)
-            .ok_or_else(|| FormatError("Expanded outline transfer exceeds 32 MiB.".into()))?;
+            .ok_or_else(|| FormatError("Expanded text transfer exceeds 32 MiB.".into()))?;
         if let Some(output) = &mut self.text {
             output.push_str(text);
         }

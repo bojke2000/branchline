@@ -1,0 +1,9 @@
+{
+  "name": "bmm-mermaid-verification",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "mermaid": "12.2.0",
+    "jsdom": "26.1.0"
+  }
+}
