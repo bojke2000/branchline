@@ -1,7 +1,8 @@
 use branchline::{
-    app::{DetailsDraft, EditorAction},
+    app::{DetailsDraft, DraftField, EditorAction, EditorEdit},
     document::MAX_FIELD_BYTES,
     session::{MapSession, SessionId},
+    workspace::Workspace,
 };
 
 #[test]
@@ -63,4 +64,98 @@ fn details_flush_does_not_publish_half_an_invalid_draft() {
     assert!(session.editor.details.is_none());
     session.editor.dispatch(EditorAction::Undo).unwrap();
     assert_eq!(session.editor.document, before);
+}
+
+#[test]
+fn workspace_growth_is_admitted_atomically() {
+    let mut workspace = Workspace::new();
+    let id = workspace.active_id();
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::Edit))
+        .unwrap();
+    let node = workspace.map().editor.selected.clone();
+    workspace
+        .apply(
+            id,
+            EditorEdit::SetDraft {
+                field: DraftField::Inline(node.clone()),
+                text: "A retained draft".into(),
+            },
+        )
+        .unwrap();
+    let before = workspace.map().editor.document.clone();
+    let generation = workspace.map().editor.history.generation;
+    assert!(
+        workspace
+            .apply(
+                id,
+                EditorEdit::SetDraft {
+                    field: DraftField::Inline(node),
+                    text: "x".repeat(MAX_FIELD_BYTES + 1),
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(workspace.map().editor.document, before);
+    assert_eq!(workspace.map().editor.history.generation, generation);
+    assert_eq!(
+        workspace.map().editor.editing.as_ref().unwrap().text,
+        "A retained draft"
+    );
+    workspace.apply(id, EditorEdit::CommitDrafts).unwrap();
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::Undo))
+        .unwrap();
+    assert_eq!(workspace.map().editor.document, before);
+}
+
+#[test]
+fn maximum_supported_map_opens_beside_pristine_blank() {
+    use branchline::document::{Document, MAX_FILE_BYTES, MAX_NODES, Node, Side};
+    use branchline::interchange::write_native;
+    let mut document = Document::new("");
+    let root = document.root.clone();
+    for index in 1..MAX_NODES {
+        let id = format!("n{index}");
+        document
+            .nodes
+            .get_mut(&root)
+            .unwrap()
+            .children
+            .push(id.clone());
+        document.nodes.insert(
+            id.clone(),
+            Node {
+                id,
+                text: String::new(),
+                notes: String::new(),
+                link: String::new(),
+                children: Vec::new(),
+                side: Side::Right,
+                folded: false,
+            },
+        );
+    }
+    let mut remaining = MAX_FILE_BYTES - write_native(&document).unwrap().len();
+    for node in document.nodes.values_mut() {
+        let bytes = remaining.min(MAX_FIELD_BYTES);
+        node.text = "x".repeat(bytes);
+        remaining -= bytes;
+        if remaining == 0 {
+            break;
+        }
+    }
+    assert_eq!(remaining, 0);
+    assert_eq!(write_native(&document).unwrap().len(), MAX_FILE_BYTES);
+    let mut workspace = Workspace::new();
+    let blank = workspace.active_id();
+    let mut loaded = MapSession::new_blank(SessionId::new());
+    loaded
+        .editor
+        .replace_document(document, None, true, None)
+        .unwrap();
+    workspace.insert_session(loaded).unwrap();
+    assert_eq!(workspace.len(), 2);
+    assert!(workspace.session(blank).unwrap().is_pristine_blank());
+    assert!(workspace.estimated_bytes() <= 256 * 1024 * 1024);
 }

@@ -1,6 +1,6 @@
 pub use crate::commands::palette_matches;
 use crate::{
-    app::{DetailsDraft, EditorAction, EditorError, EditorKey, PendingAction},
+    app::{DraftField, EditorAction, EditorEdit, EditorError, EditorKey, PendingAction},
     appearance,
     commands::{self, AppCommand, FILE_COMMANDS, NAVIGATION_COMMANDS, VIEW_COMMANDS},
     document::{Command, DeletionPlan, Document, MovePlacement, NodeId},
@@ -36,6 +36,7 @@ enum Dialog {
     },
 }
 
+mod details;
 mod tabs;
 
 pub struct NativeApp {
@@ -127,36 +128,36 @@ impl NativeApp {
     }
 
     fn prepare(&mut self) -> Result<(), EditorError> {
-        self.workspace.map_mut().editor.flush_details()?;
-        self.workspace.map_mut().editor.commit_edit()
+        self.edit(EditorEdit::CommitDrafts)
+    }
+
+    fn edit(&mut self, edit: EditorEdit) -> Result<(), EditorError> {
+        self.workspace
+            .apply(self.workspace.active_id(), edit)
+            .map_err(EditorError::from)
     }
 
     fn action(&mut self, action: EditorAction) {
-        let result = self
-            .workspace
-            .map_mut()
-            .editor
-            .flush_details()
-            .and_then(|_| {
-                if matches!(action, EditorAction::Delete) {
-                    let ids = self
-                        .workspace
-                        .map()
-                        .editor
-                        .selection()
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let plan = self.workspace.map().editor.document.plan_deletion(&ids)?;
-                    if ids.len() > 1 || plan.node_count > 1 {
-                        self.dialog = Some(Dialog::Delete(plan));
-                        return Ok(());
-                    }
+        let result = (|| {
+            if matches!(action, EditorAction::Delete) {
+                let ids = self
+                    .workspace
+                    .map()
+                    .editor
+                    .selection()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let plan = self.workspace.map().editor.document.plan_deletion(&ids)?;
+                if ids.len() > 1 || plan.node_count > 1 {
+                    self.dialog = Some(Dialog::Delete(plan));
+                    return Ok(());
                 }
-                self.workspace.map_mut().editor.dispatch(action)?;
-                self.focus_selected = true;
-                Ok(())
-            });
+            }
+            self.edit(EditorEdit::Action(action))?;
+            self.focus_selected = true;
+            Ok(())
+        })();
         self.report(result);
     }
 
@@ -193,7 +194,7 @@ impl NativeApp {
             AppCommand::Palette => self.open_palette(),
             AppCommand::Notes => {
                 if self.workspace.map().notes_open {
-                    let result = self.workspace.map_mut().editor.flush_details();
+                    let result = self.edit(EditorEdit::FlushDetails);
                     if let Err(error) = result {
                         self.report(Err(error));
                         return;
@@ -773,62 +774,6 @@ impl NativeApp {
         self.report(result);
     }
 
-    fn details_panel(&mut self, ui: &mut egui::Ui) {
-        if self
-            .workspace
-            .map()
-            .editor
-            .details
-            .as_ref()
-            .is_none_or(|details| details.id != self.workspace.map().editor.selected)
-        {
-            if let Err(error) = self.workspace.map_mut().editor.flush_details() {
-                self.report(Err(error));
-                return;
-            }
-            let node =
-                &self.workspace.map().editor.document.nodes[&self.workspace.map().editor.selected];
-            self.workspace.map_mut().editor.details = Some(DetailsDraft {
-                id: node.id.clone(),
-                notes: node.notes.clone(),
-                link: node.link.clone(),
-            });
-        }
-        let mut commit = false;
-        egui::Panel::right("notes").default_size(290.0).min_size(220.0).show(ui, |ui| {
-            ui.add_space(12.0);
-            ui.heading("A little more context");
-            ui.weak("Notes for the selected idea");
-            ui.add_space(12.0);
-            let session = self.workspace.active_id();
-            if let Some(details) = &mut self.workspace.map_mut().editor.details {
-                let response = ui.add(egui::TextEdit::multiline(&mut details.notes).id(Id::unique(("notes", session, &details.id))).desired_width(f32::INFINITY).desired_rows(14).hint_text("Capture details here...").char_limit(262_144));
-                self.owned_widgets.entry(session).or_default().insert(response.id);
-                if response.changed() { self.recovery_revision = None; self.last_change = Instant::now(); }
-                commit |= response.lost_focus();
-                ui.add_space(12.0);
-                ui.label("Link");
-                let response = ui.add(egui::TextEdit::singleline(&mut details.link).id(Id::unique(("link", session, &details.id))).hint_text("Paste a URL or path").char_limit(262_144));
-                self.owned_widgets.entry(session).or_default().insert(response.id);
-                if response.changed() { self.recovery_revision = None; self.last_change = Instant::now(); }
-                commit |= response.lost_focus();
-                if ui.button("Open link").clicked() && !details.link.is_empty() {
-                    let allowed = ["https://", "http://", "mailto:"].iter().any(|prefix| details.link.starts_with(prefix));
-                    if allowed {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(&details.link));
-                    } else {
-                        self.error = Some("Only explicit http, https and mailto links can be opened here; copy other paths manually.".into());
-                    }
-                }
-                ui.weak("Notes are plain text. No scripts or formulas run.");
-            }
-        });
-        if commit && self.workspace.pending_activation().is_none() && self.pending_close.is_none() {
-            let result = self.workspace.map_mut().editor.flush_details();
-            self.report(result);
-        }
-    }
-
     fn search_panel(&mut self, ui: &mut egui::Ui) {
         let mut selected = None;
         let session = self.workspace.active_id();
@@ -882,12 +827,7 @@ impl NativeApp {
             }
         });
         if let Some(id) = selected {
-            let result = self
-                .workspace
-                .map_mut()
-                .editor
-                .flush_details()
-                .and_then(|_| self.workspace.map_mut().editor.reveal_selection(&id));
+            let result = self.edit(EditorEdit::Command(Command::Reveal { id }));
             self.report(result);
             self.focus_selected = true;
         }
@@ -1018,12 +958,7 @@ impl NativeApp {
                 _ => false,
             })
         {
-            let result = self
-                .workspace
-                .map_mut()
-                .editor
-                .flush_details()
-                .and_then(|_| self.workspace.map_mut().editor.begin_replacement());
+            let result = self.edit(EditorEdit::BeginReplacement);
             if result.is_ok() {
                 self.edit_focus = None;
                 self.focus_selected = true;
@@ -1353,11 +1288,12 @@ impl NativeApp {
                     .insert(inline_id);
                 let buffer = self
                     .workspace
-                    .map_mut()
+                    .map()
                     .editor
                     .editing
-                    .as_mut()
+                    .as_ref()
                     .expect("editing node");
+                let mut text = buffer.text.clone();
                 if first_focus {
                     ui.memory_mut(|memory| memory.request_focus(inline_id));
                     let mut state = egui::text_edit::TextEditState::default();
@@ -1365,21 +1301,24 @@ impl NativeApp {
                         .cursor
                         .set_char_range(Some(egui::text::CCursorRange::two(
                             egui::text::CCursor::new(0),
-                            egui::text::CCursor::new(buffer.text.chars().count()),
+                            egui::text::CCursor::new(text.chars().count()),
                         )));
                     state.store(ui.ctx(), inline_id);
                     self.edit_focus = Some(id.clone());
                 }
                 let response = ui.put(
                     rect.shrink(7.0),
-                    egui::TextEdit::singleline(&mut buffer.text)
+                    egui::TextEdit::singleline(&mut text)
                         .id(inline_id)
                         .font(FontId::proportional(16.0 * zoom))
                         .char_limit(262_144),
                 );
                 if response.changed() {
-                    self.recovery_revision = None;
-                    self.last_change = Instant::now();
+                    let result = self.edit(EditorEdit::SetDraft {
+                        field: DraftField::Inline(id.clone()),
+                        text,
+                    });
+                    self.report(result);
                 }
                 if !inline_composing
                     && edit_key.is_none()
@@ -1475,12 +1414,7 @@ impl NativeApp {
             self.edit_focus = None;
         }
         if let Some((key, focus)) = edit_key {
-            let result = self
-                .workspace
-                .map_mut()
-                .editor
-                .handle_key(key, false, false)
-                .map(|_| ());
+            let result = self.edit(EditorEdit::Key(key));
             self.report(result);
             if self.workspace.map().editor.editing.is_none() {
                 ui.memory_mut(|memory| memory.surrender_focus(focus));
@@ -1489,20 +1423,13 @@ impl NativeApp {
             self.focus_selected = true;
         }
         if let Some((id, toggle, preserve)) = clicked {
-            let result = self
-                .workspace
-                .map_mut()
-                .editor
-                .flush_details()
-                .and_then(|_| {
-                    if toggle {
-                        self.workspace.map_mut().editor.toggle_selection(&id)
-                    } else if preserve {
-                        self.workspace.map_mut().editor.activate_selection(&id)
-                    } else {
-                        self.workspace.map_mut().editor.select(&id)
-                    }
-                });
+            let result = self.edit(if toggle {
+                EditorEdit::ToggleSelection(id)
+            } else if preserve {
+                EditorEdit::ActivateSelection(id)
+            } else {
+                EditorEdit::Select(id)
+            });
             self.report(result);
             if edit {
                 self.action(EditorAction::Edit);
@@ -1517,18 +1444,11 @@ impl NativeApp {
             });
         }
         if let Some(id) = fold {
-            let result = self.prepare().and_then(|_| {
-                self.workspace
-                    .map_mut()
-                    .editor
-                    .execute(Command::ToggleFold { id })
-            });
+            let result = self.edit(EditorEdit::Command(Command::ToggleFold { id }));
             self.report(result);
         }
         if let Some(id) = drag_started {
-            let result = self
-                .prepare()
-                .and_then(|_| self.workspace.map_mut().editor.select(&id));
+            let result = self.edit(EditorEdit::Select(id.clone()));
             if result.is_ok() {
                 if id == self.workspace.map().editor.document.root {
                     if let Some(origin) = ui.input(|input| input.pointer.press_origin()) {
@@ -1633,10 +1553,10 @@ impl NativeApp {
             match drag.preview {
                 Some(preview) if preview.rejection.is_none() => {
                     let before = self.workspace.map().editor.revision;
-                    let result = self.workspace.map_mut().editor.execute(Command::MoveNode {
+                    let result = self.edit(EditorEdit::Command(Command::MoveNode {
                         id: drag.source,
                         placement: preview.placement,
-                    });
+                    }));
                     if result.is_ok() {
                         self.focus_selected = true;
                         self.status = if before == self.workspace.map().editor.revision {
@@ -1843,7 +1763,7 @@ impl NativeApp {
                     if plan.root_retained { ui.label("The central idea will be kept."); }
                     ui.horizontal(|ui| {
                         if ui.button("Delete selected branches").clicked() {
-                            let result = self.workspace.map_mut().editor.execute(Command::DeleteMany { ids: plan.roots.clone() });
+                            let result = self.edit(EditorEdit::Command(Command::DeleteMany { ids: plan.roots.clone() }));
                             if result.is_ok() {
                                 self.status = if plan.root_retained { "Selected branches deleted. The central idea was kept. Undo restores the deletion." }
                                     else { "Selected branches deleted. Undo restores the deletion." }.into();

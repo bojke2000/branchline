@@ -4,6 +4,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use thiserror::Error;
 
@@ -144,17 +145,23 @@ impl RecoveryStore {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SaveCheckpoint {
-    saved: Option<Document>,
+    saved: Option<Arc<Document>>,
 }
 
 impl SaveCheckpoint {
     pub fn mark_saved(&mut self, document: &Document) {
-        self.saved = Some(document.clone());
+        self.saved = Some(Arc::new(document.clone()));
     }
 
     pub fn is_dirty(&self, document: &Document) -> bool {
-        self.saved.as_ref() != Some(document)
+        self.saved.as_deref() != Some(document)
+    }
+
+    pub fn estimated_bytes(&self) -> usize {
+        self.saved
+            .as_ref()
+            .map_or(0, |document| document.estimated_bytes())
     }
 }

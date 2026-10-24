@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::Arc,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -79,6 +82,35 @@ pub struct DeletionPlan {
 }
 
 impl Document {
+    pub fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.root.len()
+            + self
+                .nodes
+                .values()
+                .map(|node| {
+                    std::mem::size_of::<Node>()
+                        + node.id.len()
+                        + node.text.len()
+                        + node.notes.len()
+                        + node.link.len()
+                        + node
+                            .children
+                            .iter()
+                            .map(|id| id.len() + std::mem::size_of::<String>())
+                            .sum::<usize>()
+                        + 128
+                })
+                .sum::<usize>()
+    }
+
+    pub fn decoded_text_bytes(&self) -> usize {
+        self.nodes
+            .values()
+            .map(|node| node.text.len() + node.notes.len() + node.link.len())
+            .sum()
+    }
+
     pub fn new(text: &str) -> Self {
         let node = Node::new(text, Side::Right);
         Self {
@@ -577,12 +609,21 @@ pub enum Command {
     },
 }
 
-#[derive(Default)]
+#[derive(Clone)]
+struct HistoryEntry {
+    document: Arc<Document>,
+    bytes: usize,
+    serial: u64,
+    stamp: u64,
+}
+
+#[derive(Clone, Default)]
 pub struct History {
-    undo: VecDeque<(Document, usize)>,
-    redo: VecDeque<(Document, usize)>,
+    undo: VecDeque<HistoryEntry>,
+    redo: VecDeque<HistoryEntry>,
     pub evicted: bool,
     pub generation: u64,
+    next_serial: u64,
 }
 
 impl History {
@@ -597,51 +638,40 @@ impl History {
         candidate.validate()?;
         if candidate != *doc {
             self.redo.clear();
-            Self::push(&mut self.undo, doc.clone(), &mut self.evicted);
+            self.push(doc.clone(), false);
             *doc = candidate;
             self.generation = self.generation.wrapping_add(1);
         }
         Ok(selected)
     }
 
-    fn push(stack: &mut VecDeque<(Document, usize)>, doc: Document, evicted: &mut bool) {
-        let bytes = doc
-            .nodes
-            .values()
-            .map(|node| {
-                std::mem::size_of::<Node>()
-                    + node.id.len()
-                    + node.text.len()
-                    + node.notes.len()
-                    + node.link.len()
-                    + node
-                        .children
-                        .iter()
-                        .map(|id| id.len() + std::mem::size_of::<String>())
-                        .sum::<usize>()
-                    + 128
-            })
-            .sum::<usize>();
-        while stack.iter().map(|(_, bytes)| bytes).sum::<usize>() + bytes > HISTORY_BYTES
+    fn push(&mut self, doc: Document, redo: bool) {
+        let bytes = doc.estimated_bytes();
+        let stack = if redo { &mut self.redo } else { &mut self.undo };
+        while stack.iter().map(|entry| entry.bytes).sum::<usize>() + bytes > HISTORY_BYTES
             && !stack.is_empty()
         {
             stack.pop_front();
-            *evicted = true;
+            self.evicted = true;
         }
+        let serial = self.next_serial;
+        self.next_serial += 1;
         if bytes <= HISTORY_BYTES {
-            stack.push_back((doc, bytes));
+            stack.push_back(HistoryEntry {
+                document: Arc::new(doc),
+                bytes,
+                serial,
+                stamp: serial,
+            });
         } else {
-            *evicted = true;
+            self.evicted = true;
         }
     }
 
     pub fn undo(&mut self, doc: &mut Document) -> bool {
-        if let Some((previous, _)) = self.undo.pop_back() {
-            Self::push(
-                &mut self.redo,
-                std::mem::replace(doc, previous),
-                &mut self.evicted,
-            );
+        if let Some(previous) = self.undo.pop_back() {
+            let previous = Arc::unwrap_or_clone(previous.document);
+            self.push(std::mem::replace(doc, previous), true);
             true
         } else {
             false
@@ -649,15 +679,54 @@ impl History {
     }
 
     pub fn redo(&mut self, doc: &mut Document) -> bool {
-        if let Some((next, _)) = self.redo.pop_back() {
-            Self::push(
-                &mut self.undo,
-                std::mem::replace(doc, next),
-                &mut self.evicted,
-            );
+        if let Some(next) = self.redo.pop_back() {
+            let next = Arc::unwrap_or_clone(next.document);
+            self.push(std::mem::replace(doc, next), false);
             true
         } else {
             false
         }
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .map(|entry| entry.bytes)
+            .sum()
+    }
+
+    pub(crate) fn next_serial(&self) -> u64 {
+        self.next_serial
+    }
+
+    pub(crate) fn stamp_since(&mut self, serial: u64, stamp: u64) {
+        for entry in self.undo.iter_mut().chain(&mut self.redo) {
+            if entry.serial >= serial {
+                entry.stamp = stamp + entry.serial - serial;
+            }
+        }
+    }
+
+    pub fn oldest_retained(&self) -> Option<(u64, usize)> {
+        self.undo
+            .front()
+            .into_iter()
+            .chain(self.redo.front())
+            .map(|entry| (entry.stamp, entry.bytes))
+            .min_by_key(|entry| entry.0)
+    }
+
+    pub fn evict_oldest(&mut self, stamp: u64) -> bool {
+        let stack = if self.undo.front().is_some_and(|entry| entry.stamp == stamp) {
+            &mut self.undo
+        } else if self.redo.front().is_some_and(|entry| entry.stamp == stamp) {
+            &mut self.redo
+        } else {
+            return false;
+        };
+        stack.pop_front();
+        self.evicted = true;
+        true
     }
 }

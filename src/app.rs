@@ -1,5 +1,7 @@
 use crate::{
-    document::{Command, Document, DocumentError, History, NodeId, Side},
+    document::{
+        Command, Document, DocumentError, History, MAX_FIELD_BYTES, MAX_TEXT_BYTES, NodeId, Side,
+    },
     interchange::{FormatError, ImportReport, write_native},
     storage::{SaveCheckpoint, StorageError, atomic_write},
 };
@@ -61,6 +63,7 @@ pub enum PendingAction {
     Quit,
 }
 
+#[derive(Clone)]
 pub struct EditBuffer {
     pub id: NodeId,
     pub text: String,
@@ -71,6 +74,47 @@ pub struct DetailsDraft {
     pub id: NodeId,
     pub notes: String,
     pub link: String,
+}
+
+pub enum DraftField {
+    Inline(NodeId),
+    Notes(NodeId),
+    Link(NodeId),
+}
+
+pub enum EditorEdit {
+    Action(EditorAction),
+    Key(EditorKey),
+    Command(Command),
+    Select(NodeId),
+    ToggleSelection(NodeId),
+    ActivateSelection(NodeId),
+    BeginReplacement,
+    BeginDetails(NodeId),
+    FlushDetails,
+    CommitDrafts,
+    SetDraft { field: DraftField, text: String },
+}
+
+enum PreparedKind {
+    Editor(Box<Editor>),
+    Draft { field: DraftField, text: String },
+}
+
+pub struct PreparedEdit {
+    kind: PreparedKind,
+    estimated_bytes: usize,
+    original_serial: u64,
+    history_entries: u64,
+}
+
+impl PreparedEdit {
+    pub fn estimated_bytes(&self) -> usize {
+        self.estimated_bytes
+    }
+    pub fn history_entries(&self) -> u64 {
+        self.history_entries
+    }
 }
 
 pub struct Editor {
@@ -88,6 +132,8 @@ pub struct Editor {
     pub draft_revision: u64,
     checkpoint: SaveCheckpoint,
     dirty: bool,
+    document_bytes: usize,
+    text_bytes: usize,
 }
 
 impl Default for Editor {
@@ -104,6 +150,8 @@ impl Editor {
         Self {
             selected: document.root.clone(),
             selection: BTreeSet::from([document.root.clone()]),
+            document_bytes: document.estimated_bytes(),
+            text_bytes: document.decoded_text_bytes(),
             document,
             history: History::default(),
             editing: None,
@@ -121,6 +169,187 @@ impl Editor {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    pub fn estimated_bytes(&self) -> usize {
+        self.document_bytes
+            + self.checkpoint.estimated_bytes()
+            + std::mem::size_of::<Self>()
+            + self.document_id.len()
+            + self.selected.len()
+            + self.selection.iter().map(|id| id.len() + 64).sum::<usize>()
+            + self.path.as_ref().map_or(0, |path| path.as_os_str().len())
+            + self.editing.as_ref().map_or(0, |draft| {
+                draft.id.len() + draft.text.len() + std::mem::size_of::<EditBuffer>()
+            })
+            + self.details.as_ref().map_or(0, |draft| {
+                draft.id.len()
+                    + draft.notes.len()
+                    + draft.link.len()
+                    + std::mem::size_of::<DetailsDraft>()
+            })
+    }
+
+    fn draft_value(&self, field: &DraftField) -> Result<&str, EditorError> {
+        match field {
+            DraftField::Inline(id) => self
+                .editing
+                .as_ref()
+                .filter(|draft| &draft.id == id)
+                .map(|draft| draft.text.as_str()),
+            DraftField::Notes(id) => self
+                .details
+                .as_ref()
+                .filter(|draft| &draft.id == id)
+                .map(|draft| draft.notes.as_str()),
+            DraftField::Link(id) => self
+                .details
+                .as_ref()
+                .filter(|draft| &draft.id == id)
+                .map(|draft| draft.link.as_str()),
+        }
+        .ok_or_else(|| {
+            EditorError::State("The requested text draft is no longer owned by this field.".into())
+        })
+    }
+
+    fn effective_text_bytes(&self) -> Result<usize, EditorError> {
+        self.validate_draft_owners()?;
+        let mut bytes = self.text_bytes;
+        if let Some(draft) = &self.editing {
+            bytes = bytes - self.document.nodes[&draft.id].text.len() + draft.text.len();
+        }
+        if let Some(draft) = &self.details {
+            let node = &self.document.nodes[&draft.id];
+            bytes =
+                bytes - node.notes.len() - node.link.len() + draft.notes.len() + draft.link.len();
+        }
+        Ok(bytes)
+    }
+
+    pub fn prepare(&self, edit: &EditorEdit) -> Result<PreparedEdit, EditorError> {
+        let original_serial = self.history.next_serial();
+        if let EditorEdit::SetDraft { field, text } = edit {
+            let previous = self.draft_value(field)?;
+            if text.len() > MAX_FIELD_BYTES
+                || self.effective_text_bytes()? - previous.len() + text.len() > MAX_TEXT_BYTES
+            {
+                return Err(EditorError::State("Text exceeds the document field or decoded-text limit; the previous draft was retained.".into()));
+            }
+            let field = match field {
+                DraftField::Inline(id) => DraftField::Inline(id.clone()),
+                DraftField::Notes(id) => DraftField::Notes(id.clone()),
+                DraftField::Link(id) => DraftField::Link(id.clone()),
+            };
+            return Ok(PreparedEdit {
+                estimated_bytes: self.estimated_bytes() - previous.len() + text.len(),
+                kind: PreparedKind::Draft {
+                    field,
+                    text: text.clone(),
+                },
+                original_serial,
+                history_entries: 0,
+            });
+        }
+        let mut candidate = Self {
+            document: self.document.clone(),
+            selected: self.selected.clone(),
+            selection: self.selection.clone(),
+            history: self.history.clone(),
+            editing: self.editing.clone(),
+            details: self.details.clone(),
+            path: self.path.clone(),
+            document_id: self.document_id.clone(),
+            pending: self.pending.clone(),
+            staged_import: None,
+            revision: self.revision,
+            draft_revision: self.draft_revision,
+            checkpoint: self.checkpoint.clone(),
+            dirty: self.dirty,
+            document_bytes: self.document_bytes,
+            text_bytes: self.text_bytes,
+        };
+        match edit {
+            EditorEdit::Action(action) => {
+                candidate.flush_details()?;
+                candidate.dispatch(*action)?;
+            }
+            EditorEdit::Key(key) => {
+                candidate.handle_key(*key, false, false)?;
+            }
+            EditorEdit::Command(command) => {
+                candidate.flush_details()?;
+                candidate.commit_edit()?;
+                candidate.execute(command.clone())?;
+            }
+            EditorEdit::Select(id) => {
+                candidate.flush_details()?;
+                candidate.select(id)?;
+            }
+            EditorEdit::ToggleSelection(id) => {
+                candidate.flush_details()?;
+                candidate.toggle_selection(id)?;
+            }
+            EditorEdit::ActivateSelection(id) => {
+                candidate.flush_details()?;
+                candidate.activate_selection(id)?;
+            }
+            EditorEdit::BeginReplacement => {
+                candidate.flush_details()?;
+                candidate.begin_replacement()?;
+            }
+            EditorEdit::BeginDetails(id) => {
+                candidate.flush_details()?;
+                let node = candidate
+                    .document
+                    .nodes
+                    .get(id)
+                    .ok_or_else(|| EditorError::State("Unknown notes owner".into()))?;
+                candidate.details = Some(DetailsDraft {
+                    id: id.clone(),
+                    notes: node.notes.clone(),
+                    link: node.link.clone(),
+                });
+                candidate.draft_revision = candidate.draft_revision.wrapping_add(1);
+            }
+            EditorEdit::FlushDetails => candidate.flush_details()?,
+            EditorEdit::CommitDrafts => {
+                candidate.flush_details()?;
+                candidate.commit_edit()?;
+            }
+            EditorEdit::SetDraft { .. } => unreachable!("draft updates use narrow preparation"),
+        }
+        candidate.validate_draft_owners()?;
+        Ok(PreparedEdit {
+            estimated_bytes: candidate.estimated_bytes(),
+            history_entries: candidate.history.next_serial() - original_serial,
+            original_serial,
+            kind: PreparedKind::Editor(Box::new(candidate)),
+        })
+    }
+
+    pub fn commit_prepared(&mut self, edit: PreparedEdit, stamp: u64) {
+        match edit.kind {
+            PreparedKind::Editor(mut candidate) => {
+                candidate.history.stamp_since(edit.original_serial, stamp);
+                candidate.staged_import = self.staged_import.take();
+                *self = *candidate;
+            }
+            PreparedKind::Draft { field, text } => {
+                match field {
+                    DraftField::Inline(_) => {
+                        self.editing.as_mut().expect("admitted draft").text = text
+                    }
+                    DraftField::Notes(_) => {
+                        self.details.as_mut().expect("admitted draft").notes = text
+                    }
+                    DraftField::Link(_) => {
+                        self.details.as_mut().expect("admitted draft").link = text
+                    }
+                }
+                self.draft_revision = self.draft_revision.wrapping_add(1);
+            }
+        }
     }
 
     fn validate_draft_owners(&self) -> Result<(), EditorError> {
@@ -205,6 +434,8 @@ impl Editor {
     }
 
     fn changed(&mut self) {
+        self.document_bytes = self.document.estimated_bytes();
+        self.text_bytes = self.document.decoded_text_bytes();
         self.revision = self.revision.wrapping_add(1);
         self.dirty = self.checkpoint.is_dirty(&self.document);
         self.reconcile_selection();

@@ -94,6 +94,10 @@ pub struct MapSession {
 }
 
 impl MapSession {
+    pub fn estimated_bytes(&self) -> usize {
+        self.editor.estimated_bytes() + std::mem::size_of::<Self>() + 4096
+    }
+
     pub fn new_blank(id: SessionId) -> Self {
         Self {
             id,
