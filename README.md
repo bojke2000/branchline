@@ -135,6 +135,9 @@ their root branch's layout side and color. Reordering keeps branch colors stable
 Folding, notes and metadata are undoable. The command palette, context menus and
 toolbar use the same command definitions and dispatch as keyboard shortcuts.
 Typing replaces only the active node, even when several nodes are selected.
+Label, notes and link edits retain complete valid text up to the 1 MiB UTF-8
+field limit. Oversized edits show an error and keep the previous draft rather
+than saving a clipped prefix.
 The original label remains unchanged until the edit is committed; Undo restores
 a committed replacement. Search, notes and dialogs retain their own text input.
 
