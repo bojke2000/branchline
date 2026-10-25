@@ -35,7 +35,7 @@ impl NativeApp {
             let response = ui.add_enabled(enabled, egui::TextEdit::multiline(&mut details.notes)
                 .id(Id::unique(("notes", session, &details.id)))
                 .desired_width(f32::INFINITY).desired_rows(14)
-                .hint_text("Capture details here...").char_limit(262_144));
+                .hint_text("Capture details here...").char_limit(DRAFT_CHAR_PROBE_LIMIT));
             self.owned_widgets.entry(session).or_default().insert(response.id);
             if response.changed() {
                 let result = self.edit(EditorEdit::SetDraft {
@@ -49,7 +49,7 @@ impl NativeApp {
             ui.label("Link");
             let response = ui.add_enabled(enabled, egui::TextEdit::singleline(&mut details.link)
                 .id(Id::unique(("link", session, &details.id)))
-                .hint_text("Paste a URL or path").char_limit(262_144));
+                .hint_text("Paste a URL or path").char_limit(DRAFT_CHAR_PROBE_LIMIT));
             self.owned_widgets.entry(session).or_default().insert(response.id);
             if response.changed() {
                 let result = self.edit(EditorEdit::SetDraft {

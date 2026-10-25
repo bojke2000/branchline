@@ -21,6 +21,123 @@ struct ClipboardState {
     fail_write: bool,
 }
 struct FakeClipboard(Arc<Mutex<ClipboardState>>);
+
+#[test]
+fn standalone_backend_clipboard_commands_work_immediately_after_tab_switch() {
+    for copy in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = ClipboardPayload {
+            plain: Some("- Pasted after switch".into()),
+            html: None,
+        };
+        let (mut app, state) = app_with_clipboard(temp.path(), payload);
+        let ctx = egui::Context::default();
+        render(&mut app, &ctx, vec![]);
+        let source = app.workspace.active_id();
+        key(&mut app, &ctx, egui::Key::N, egui::Modifiers::COMMAND);
+        let target = app.workspace.active_id();
+        key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::CTRL);
+        assert_eq!(app.workspace.active_id(), source);
+        key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::CTRL);
+        assert_eq!(app.workspace.active_id(), target);
+        let event = if copy {
+            egui::Event::Copy
+        } else {
+            egui::Event::Paste("- Pasted after switch".into())
+        };
+        render(&mut app, &ctx, vec![event]);
+        let clipboard = state.lock().unwrap();
+        if copy {
+            assert_eq!(clipboard.writes.len(), 1);
+            assert_eq!(
+                clipboard.writes[0].plain.as_deref(),
+                Some("- Central idea\n")
+            );
+        } else {
+            assert_eq!(clipboard.reads, 1);
+            let document = &app.workspace.session(target).unwrap().editor.document;
+            assert_eq!(document.nodes[&document.root].text, "Pasted after switch");
+        }
+        let untouched = &app.workspace.session(source).unwrap().editor.document;
+        assert_eq!(untouched.nodes[&untouched.root].text, "Central idea");
+    }
+}
+
+#[test]
+fn draft_widgets_admit_complete_large_pastes_and_reject_overflow_atomically() {
+    for field in ["inline", "notes", "link"] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut app, state) = app_with_clipboard(temp.path(), ClipboardPayload::default());
+        let ctx = egui::Context::default();
+        let session = app.workspace.active_id();
+        let owner = app.workspace.map().editor.selected.clone();
+        if field == "inline" {
+            app.workspace
+                .apply(session, EditorEdit::Action(EditorAction::Edit))
+                .unwrap();
+        } else {
+            app.workspace.map_mut().notes_open = true;
+        }
+        render(&mut app, &ctx, vec![]);
+        render(&mut app, &ctx, vec![]);
+        let widget = egui::Id::unique((field, session, &owner));
+        let before = app.workspace.map().editor.document.clone();
+        fn value(app: &NativeApp, field: &str) -> String {
+            let editor = &app.workspace.map().editor;
+            match field {
+                "inline" => editor.editing.as_ref().unwrap().text.clone(),
+                "notes" => editor.details.as_ref().unwrap().notes.clone(),
+                _ => editor.details.as_ref().unwrap().link.clone(),
+            }
+        }
+        fn select_all(ctx: &egui::Context, widget: egui::Id, count: usize) {
+            ctx.memory_mut(|memory| memory.request_focus(widget));
+            let mut state = egui::TextEdit::load_state(ctx, widget).unwrap();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(count),
+                )));
+            state.store(ctx, widget);
+        }
+        let original = value(&app, field);
+        select_all(&ctx, widget, original.chars().count());
+        let accepted = "a".repeat(300_000);
+        render(&mut app, &ctx, vec![egui::Event::Paste(accepted.clone())]);
+        assert_eq!(
+            value(&app, field).len(),
+            accepted.len(),
+            "{field} silently clipped accepted text"
+        );
+        assert_eq!(value(&app, field), accepted);
+        for overflow in [
+            "b".repeat(branchline::document::MAX_FIELD_BYTES + 1),
+            "🚀".repeat(branchline::document::MAX_FIELD_BYTES / 4 + 1),
+        ] {
+            select_all(&ctx, widget, accepted.len());
+            render(&mut app, &ctx, vec![egui::Event::Paste(overflow)]);
+            assert_eq!(
+                value(&app, field),
+                accepted,
+                "{field} replaced the draft with truncated overflow"
+            );
+        }
+        let shapes = render(&mut app, &ctx, vec![]);
+        assert!(shapes.iter().any(|shape| matches!(shape, Shape::Text(text) if text.galley.job.text.contains("previous draft was retained"))));
+        assert_eq!(app.workspace.map().editor.document, before);
+        key(&mut app, &ctx, egui::Key::Z, egui::Modifiers::COMMAND);
+        assert_eq!(
+            value(&app, field),
+            original,
+            "{field} retained rejected text in local undo"
+        );
+        let clipboard = state.lock().unwrap();
+        assert_eq!(clipboard.reads, 0);
+        assert!(clipboard.writes.is_empty());
+    }
+}
+
 impl OutlineClipboard for FakeClipboard {
     fn read(&mut self) -> Result<ClipboardPayload, ClipboardError> {
         let mut state = self.0.lock().unwrap();

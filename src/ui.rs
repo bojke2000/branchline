@@ -51,6 +51,9 @@ mod recovery;
 mod tabs;
 mod workspace_dialogs;
 
+// Even a clipped proposal must exceed the byte limit and fail atomic admission.
+const DRAFT_CHAR_PROBE_LIMIT: usize = crate::document::MAX_FIELD_BYTES + 1;
+
 pub struct NativeApp {
     pub workspace: Workspace,
     store: RecoveryCoordinator,
@@ -997,6 +1000,8 @@ impl NativeApp {
                     event,
                     egui::Event::Key { pressed: true, .. }
                         | egui::Event::PointerButton { pressed: true, .. }
+                        | egui::Event::Copy
+                        | egui::Event::Paste(_)
                 )
             });
             if fresh {
@@ -1409,7 +1414,7 @@ impl NativeApp {
                     egui::TextEdit::singleline(&mut text)
                         .id(inline_id)
                         .font(FontId::proportional(16.0 * zoom))
-                        .char_limit(262_144),
+                        .char_limit(DRAFT_CHAR_PROBE_LIMIT),
                 );
                 if response.changed() {
                     let result = self.edit(EditorEdit::SetDraft {

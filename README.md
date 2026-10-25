@@ -276,7 +276,7 @@ on Escape, outside release or an intervening unsaved-changes dialog.
 
 Executed on this Mac: `cargo fmt --check` passed;
 `cargo clippy --all-targets -- -D warnings` passed;
-`cargo test --locked` passed (151 tests; one optional parser test ignored);
+`cargo test --locked` passed (153 tests; one optional parser test ignored);
 `cargo build --release --locked` and `sh scripts/bundle.sh` passed.
 These results do not establish the unverified native scenarios listed below.
 
