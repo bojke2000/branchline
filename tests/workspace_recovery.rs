@@ -194,6 +194,36 @@ fn replaced_snapshot_is_not_cleanup_authority() {
 }
 
 #[test]
+fn snapshots_without_recorded_ownership_are_retained() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = RecoveryCoordinator::open(temp.path().into()).unwrap();
+    let mut workspace = Workspace::new();
+    edited(&mut workspace, "Unverifiable old recovery");
+    store.publish(&workspace.recovery_state()).unwrap();
+    drop(store);
+    let path = temp.path().join("workspace.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["tabs"][0]["snapshot"]["owner"] = serde_json::json!("Unavailable");
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let snapshot = snapshot_paths(temp.path()).pop().unwrap();
+    let before = fs::read(&snapshot).unwrap();
+    let mut store = RecoveryCoordinator::open(temp.path().into()).unwrap();
+    let restored = store.load().unwrap();
+    let RestoreContent::Failed(reason) = &restored.sessions[0].content else {
+        panic!("unrecorded ownership must not be trusted");
+    };
+    assert!(reason.contains("ownership was not recorded"));
+    let empty = branchline::recovery::WorkspaceRecoveryState {
+        active: None,
+        sessions: vec![],
+    };
+    assert!(store.publish(&empty).unwrap().cleanup_error.is_some());
+    assert!(store.retry_cleanup().is_err());
+    assert_eq!(fs::read(&snapshot).unwrap(), before);
+}
+
+#[test]
 fn malformed_store_is_retained() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("workspace.json");

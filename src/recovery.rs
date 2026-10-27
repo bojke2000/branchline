@@ -14,7 +14,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 
@@ -51,6 +51,11 @@ enum FileProof {
         inode: u64,
         created_ns: u128,
     },
+    Windows {
+        volume: u64,
+        file_id: [u8; 16],
+        created: u64,
+    },
     Unavailable,
 }
 
@@ -63,7 +68,7 @@ impl FileProof {
             let created_ns = metadata
                 .created()
                 .map_err(error)?
-                .duration_since(UNIX_EPOCH)
+                .duration_since(std::time::UNIX_EPOCH)
                 .map_err(error)?
                 .as_nanos();
             Ok(Self::Unix {
@@ -72,7 +77,34 @@ impl FileProof {
                 created_ns,
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            use std::os::windows::{fs::MetadataExt, io::AsRawHandle};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+            };
+            let mut info = std::mem::MaybeUninit::<FILE_ID_INFO>::uninit();
+            // The borrowed file handle stays live and the buffer has the required size.
+            if unsafe {
+                GetFileInformationByHandleEx(
+                    file.as_raw_handle(),
+                    FileIdInfo,
+                    info.as_mut_ptr().cast(),
+                    std::mem::size_of::<FILE_ID_INFO>() as u32,
+                )
+            } == 0
+            {
+                return Err(error(std::io::Error::last_os_error()));
+            }
+            // A successful call initializes FILE_ID_INFO.
+            let info = unsafe { info.assume_init() };
+            Ok(Self::Windows {
+                volume: info.VolumeSerialNumber,
+                file_id: info.FileId.Identifier,
+                created: file.metadata().map_err(error)?.creation_time(),
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = file;
             Ok(Self::Unavailable)
@@ -84,6 +116,12 @@ impl FileProof {
     }
 
     fn open_verified(&self, path: &Path) -> Result<File, StorageError> {
+        if matches!(self, Self::Unavailable) {
+            return Err(error(format!(
+                "{}: Snapshot ownership was not recorded by the creating build; the file was retained.",
+                path.display()
+            )));
+        }
         let metadata = fs::symlink_metadata(path).map_err(error)?;
         if !metadata.is_file() {
             return Err(error(format!(
@@ -92,7 +130,7 @@ impl FileProof {
             )));
         }
         let file = File::open(path).map_err(error)?;
-        if matches!(self, Self::Unavailable) || &Self::capture(&file)? != self {
+        if &Self::capture(&file)? != self {
             return Err(error(format!(
                 "{}: Snapshot identity changed; its replacement was retained.",
                 path.display()

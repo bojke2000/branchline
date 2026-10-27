@@ -79,6 +79,66 @@ pub(crate) fn atomic_write_opened(path: &Path, bytes: &[u8]) -> Result<File, Sto
         .as_file()
         .sync_all()
         .map_err(|e| failure(path, e))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::{
+            ffi::OsStrExt,
+            io::{AsRawHandle, FromRawHandle},
+        };
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            Storage::FileSystem::{
+                FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                ReOpenFile, ReplaceFileW, SetFileAttributesW,
+            },
+        };
+        // Keep identity without retaining read/write access that blocks Windows replacement.
+        let handle = unsafe {
+            ReOpenFile(
+                temporary.as_file().as_raw_handle(),
+                0,
+                FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                0,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(failure(path, std::io::Error::last_os_error()));
+        }
+        // The reopened handle is independently owned and refers to the same file.
+        let published = unsafe { File::from_raw_handle(handle) };
+        let (file, temporary_path) = temporary.into_parts();
+        drop(file);
+        if !path.try_exists().map_err(|e| failure(path, e))? {
+            temporary_path.persist(path).map_err(|e| failure(path, e))?;
+            return Ok(published);
+        }
+        let destination: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let source: Vec<u16> = temporary_path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // Match tempfile's persistence semantics before publishing the replacement.
+        if unsafe { SetFileAttributesW(source.as_ptr(), FILE_ATTRIBUTE_NORMAL) } == 0 {
+            return Err(failure(path, std::io::Error::last_os_error()));
+        }
+        // Unlike MoveFileExW, ReplaceFileW supports a destination held open for identity checks.
+        if unsafe {
+            ReplaceFileW(
+                destination.as_ptr(),
+                source.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        } == 0
+        {
+            return Err(failure(path, std::io::Error::last_os_error()));
+        }
+        return Ok(published);
+    }
+    #[cfg(not(windows))]
     temporary.persist(path).map_err(|e| failure(path, e.error))
 }
 

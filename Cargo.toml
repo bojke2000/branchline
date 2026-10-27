@@ -19,6 +19,9 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 uuid = { version = "1.29.0", features = ["v4", "serde"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSPasteboard", "NSPasteboardItem"] }

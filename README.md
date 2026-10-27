@@ -180,11 +180,16 @@ Version-1 `recovery.json` migrates only after a verified nonoverwriting
 `recovery-v1.backup.json`; both legacy files are retained. Each native file,
 snapshot and manifest is bounded at 32 MiB, including JSON escaping.
 
-Persistent snapshot ownership currently uses Unix device/inode and creation
-time, exercised on macOS. Platforms/filesystems without that proof report
+Persistent snapshot ownership uses Unix device/inode and creation time, or
+Windows volume serial number, 128-bit file ID and creation time. On Windows,
+recovery is stored in `%LOCALAPPDATA%\Branchline\Branchline\data`.
+Platforms/filesystems without that proof report
 unresolved ownership rather than deleting files. File flushing and atomic
 replacement are not a guarantee against every OS, filesystem, storage or
 power-loss failure; parent-directory changes are not separately fsynced.
+Snapshots from older Windows builds that recorded ownership as unavailable
+remain unverifiable and are retained, not automatically trusted or deleted.
+Save any still-open maps to native files before restarting an older build.
 
 Errors remain visible in the status area. Recovery errors do not imply a
 successful snapshot. Undo history uses bounded snapshot storage and reports
