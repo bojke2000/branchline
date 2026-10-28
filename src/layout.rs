@@ -2,6 +2,8 @@ use crate::document::{Document, NodeId, Side};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+const VERTICAL_GAP: f32 = 14.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Point {
     pub x: f32,
@@ -81,9 +83,9 @@ pub fn layout(doc: &Document, sizes: &BTreeMap<NodeId, Size>) -> Result<Layout, 
         } else {
             node.children
                 .iter()
-                .map(|id| heights[id.as_str()] + 20.0)
+                .map(|id| heights[id.as_str()] + VERTICAL_GAP)
                 .sum::<f32>()
-                - 20.0
+                - VERTICAL_GAP
         };
         heights.insert(id, size(id).height.max(children_height));
     }
@@ -131,7 +133,11 @@ pub fn layout(doc: &Document, sizes: &BTreeMap<NodeId, Size>) -> Result<Layout, 
             )]
         };
         for (side, children) in groups {
-            let height = children.iter().map(|id| heights[id] + 20.0).sum::<f32>() - 20.0;
+            let height = children
+                .iter()
+                .map(|id| heights[id] + VERTICAL_GAP)
+                .sum::<f32>()
+                - VERTICAL_GAP;
             let mut top = parent.center().y - height / 2.0;
             for child in children {
                 let child_size = size(child);
@@ -154,7 +160,7 @@ pub fn layout(doc: &Document, sizes: &BTreeMap<NodeId, Size>) -> Result<Layout, 
                 result.bounds.min.y = result.bounds.min.y.min(rect.min.y);
                 result.bounds.max.x = result.bounds.max.x.max(rect.max.x);
                 result.bounds.max.y = result.bounds.max.y.max(rect.max.y);
-                top += heights[child] + 20.0;
+                top += heights[child] + VERTICAL_GAP;
                 pending.push((child, side));
             }
         }

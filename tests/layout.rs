@@ -47,6 +47,58 @@ fn branches_do_not_overlap() {
 }
 
 #[test]
+fn nested_branches_fit_compactly_without_overlap() {
+    let mut doc = Document::new("root");
+    let mut history = History::default();
+    let root = doc.root.clone();
+    let parent = history
+        .execute(
+            &mut doc,
+            Command::AddChild {
+                parent: root,
+                text: "parent".into(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+    for _ in 0..3 {
+        let branch = history
+            .execute(
+                &mut doc,
+                Command::AddChild {
+                    parent: parent.clone(),
+                    text: "branch".into(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            history
+                .execute(
+                    &mut doc,
+                    Command::AddChild {
+                        parent: branch.clone(),
+                        text: "leaf".into(),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    let placed = layout(&doc, &BTreeMap::new()).unwrap();
+    let height = placed.bounds.max.y - placed.bounds.min.y;
+    assert!(height <= 360.0, "nested branches occupy {height} px");
+    assert_eq!(placed.bounds.center().y, placed.nodes[&parent].center().y);
+    for (a_id, a) in &placed.nodes {
+        for (b_id, b) in &placed.nodes {
+            if a_id != b_id {
+                assert!(!a.intersects(*b), "{a_id} overlaps {b_id}");
+            }
+        }
+    }
+}
+
+#[test]
 fn folded_descendants_are_absent() {
     let mut doc = Document::new("root");
     let root = doc.root.clone();
