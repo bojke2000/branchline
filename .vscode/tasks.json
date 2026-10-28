@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build Windows release",
+			"type": "shell",
+			"command": "& \"$env:USERPROFILE\\.cargo\\bin\\cargo.exe\" build --release --locked",
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "build"
+		}
+	]
+}

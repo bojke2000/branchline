@@ -2,6 +2,7 @@ pub mod app;
 mod appearance;
 pub mod clipboard;
 pub mod commands;
+pub mod desktop;
 pub mod document;
 mod drag;
 pub mod file_identity;

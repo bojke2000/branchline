@@ -34,6 +34,66 @@ loading. A user-selected HTTP/HTTPS/mailto link opens in the system handler.
 Use **Open** to import `examples/brainstorm.mm` for an original sample map.
 Import always previews compatibility and never edits the source file.
 
+### Windows rendering
+
+Windows now uses a CPU rasterizer with native bitmap presentation by default.
+This renders the **existing egui interface**, not a replacement UI: the same
+toolbar, artwork, curved branches, typography, themes, text controls, commands
+and document/recovery workflows remain in use. Rendering stays at the native
+display resolution; display scaling is not reduced.
+
+```powershell
+cargo build --release --locked
+.\target\release\branchline.exe
+# Explicit choices:
+.\target\release\branchline.exe --renderer software
+.\target\release\branchline.exe --renderer wgpu
+```
+
+Save and close an existing instance normally before rebuilding or launching
+another against the same recovery store. `--renderer wgpu` retains the previous
+rendering path for hardware-accelerated systems or troubleshooting. macOS and
+Linux keep their existing wgpu frontend. Renderer errors are reported rather
+than silently switching modes; recovery is checkpointed on a returned CPU
+renderer failure.
+
+The CPU path uses `hdrshot-egui-backend` (an egui 0.37-compatible software
+rasterizer) and `softbuffer`; `egui-winit` supplies native input, IME integration,
+clipboard handling and accessibility events. Primitive caching is disabled:
+regression tests found stale pixels after texture updates with the dependency's
+cache enabled. Tests cover color channels, texture updates, removed shapes,
+100/150/200% rasterization and close-request cancellation. Native IME and
+screen-reader interaction still require manual platform validation.
+Native-window checks verified the original toolbar/branches, F2 text entry,
+commit and the unsaved-work prompt on a Windows close request.
+Window titles are now published only when their text changes; repeatedly
+publishing the same title had requested a new frame indefinitely. A five-second
+idle check with the bundled sample observed 1.25% of one CPU core after this fix,
+instead of the continuous repaint loop. Save-path and dirty-title updates have
+their own regression test.
+
+A separate example measures the actual production UI using only a temporary
+map/recovery directory:
+
+```powershell
+cargo build --release --locked --example renderer_benchmark
+.\target\release\examples\renderer_benchmark.exe software
+.\target\release\examples\renderer_benchmark.exe wgpu
+# Interactive preview with the bundled sample map; changes are temporary:
+.\target\release\examples\renderer_benchmark.exe software --preview
+```
+
+At 200% scaling, a 1280 x 840 logical window with scripted inline editing in
+one topic measured **8.70 ms median / 13.79 ms p95** with CPU rendering, versus
+**404.83 / 438.96 ms** with Microsoft Basic Render Driver (CPU, DX12).
+Each run excludes 20 warm-up frames and records 220 frame intervals, counting
+each egui frame once even when layout needs multiple passes. Runs reject a
+display-scale change during measurement. These are native frame intervals,
+not keyboard-to-display or RDP transport latency, and not a large-map or
+pan/zoom benchmark. Native text metrics and available system fonts are retained.
+A follow-up CPU run after eliminating redundant title updates measured
+6.69 ms median / 9.23 ms p95 at the same scale.
+
 ## Keyboard and canvas
 
 | Input | Action |
@@ -371,8 +431,9 @@ application and unsaved maps.
 REA runtime screenshot
 and accessibility capture were blocked by missing macOS Screen Recording and
 Accessibility permissions; no permission settings were changed or bypassed.
-Automated UI tests run real egui frames but are not a human usability study. Real IME, VoiceOver,
-trackpad behavior, Windows and Linux remain unverified. This first release
+Automated UI tests run real egui frames but are not a human usability study. At
+that earlier macOS stage, real IME, VoiceOver, trackpad behavior, Windows and
+Linux were unverified; newer Windows rendering checks are documented above. This first release
 does not register file associations or implement Finder document-open events;
 use the in-app Open button. The bundle is local and not signed/notarized.
 

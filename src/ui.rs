@@ -48,6 +48,8 @@ mod details;
 mod mermaid_tests;
 mod paste;
 mod recovery;
+#[cfg(test)]
+mod rendering_tests;
 mod tabs;
 mod workspace_dialogs;
 
@@ -60,6 +62,7 @@ pub struct NativeApp {
     dialog: Option<Dialog>,
     error: Option<String>,
     status: String,
+    window_title: String,
     placed: Layout,
     galleys: BTreeMap<NodeId, Arc<egui::Galley>>,
     branch_colors: BTreeMap<NodeId, Color32>,
@@ -105,6 +108,7 @@ impl NativeApp {
             dialog: None,
             error: (!notices.is_empty()).then_some(notices),
             status: "Local by design. Your ideas stay on this computer.".into(),
+            window_title: String::new(),
             placed: Layout::default(),
             galleys: BTreeMap::new(),
             branch_colors: BTreeMap::new(),
@@ -814,7 +818,7 @@ impl NativeApp {
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".into());
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+        let title = format!(
             "{}{} — BMM",
             if self.workspace.map().editor.is_dirty() {
                 "* "
@@ -822,7 +826,11 @@ impl NativeApp {
                 ""
             },
             title
-        )));
+        );
+        if self.window_title != title {
+            self.window_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
         self.finish_tab_transition(&ctx);
         if self
             .clipboard_gesture
