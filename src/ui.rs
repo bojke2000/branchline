@@ -1187,7 +1187,7 @@ impl NativeApp {
                 let root = id == &self.workspace.map().editor.document.root;
                 let galley = ui.painter().layout(
                     node.text.clone(),
-                    FontId::proportional(if root { 22.0 } else { 16.0 }),
+                    FontId::proportional(if root { 24.0 } else { 18.0 }),
                     if dark {
                         Color32::from_gray(240)
                     } else {
@@ -1199,7 +1199,7 @@ impl NativeApp {
                     id.clone(),
                     Size {
                         width: (galley.size().x + 44.0).max(if root { 190.0 } else { 110.0 }),
-                        height: (galley.size().y + 26.0).max(48.0),
+                        height: (galley.size().y + 18.0).max(40.0),
                     },
                 );
                 self.galleys.insert(id.clone(), galley);
@@ -1421,7 +1421,7 @@ impl NativeApp {
                     rect.shrink(7.0),
                     egui::TextEdit::singleline(&mut text)
                         .id(inline_id)
-                        .font(FontId::proportional(16.0 * zoom))
+                        .font(FontId::proportional(18.0 * zoom))
                         .char_limit(DRAFT_CHAR_PROBE_LIMIT),
                 );
                 if response.changed() {

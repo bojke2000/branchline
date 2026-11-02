@@ -2,7 +2,7 @@ use crate::document::{Document, NodeId, Side};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
-const VERTICAL_GAP: f32 = 14.0;
+const VERTICAL_GAP: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Point {
@@ -51,7 +51,7 @@ pub fn layout(doc: &Document, sizes: &BTreeMap<NodeId, Size>) -> Result<Layout, 
     let size = |id: &str| {
         sizes.get(id).copied().unwrap_or(Size {
             width: 140.0,
-            height: 48.0,
+            height: 40.0,
         })
     };
     for id in doc.nodes.keys() {

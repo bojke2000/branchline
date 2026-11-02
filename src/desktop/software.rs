@@ -56,7 +56,7 @@ fn paint_buffer(
     buffer: &mut [u32],
     [width, height]: [usize; 2],
     primitives: &[egui::ClippedPrimitive],
-    textures: &egui::TexturesDelta,
+    textures: &mut egui::TexturesDelta,
     scale: f32,
 ) {
     let clear = egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180);
@@ -67,6 +67,7 @@ fn paint_buffer(
         textures,
         scale,
     );
+    textures.clear();
     // softbuffer requires XRGB, not the renderer's premultiplied BGRA.
     for pixel in buffer {
         *pixel &= 0x00ff_ffff;
@@ -198,7 +199,7 @@ impl<F: FnMut(&mut egui::Ui)> SoftwareApp<F> {
             &mut buffer,
             [size.width as usize, size.height as usize],
             &primitives,
-            &std::mem::take(&mut self.textures),
+            &mut std::mem::take(&mut self.textures),
             output.pixels_per_point,
         );
         native.window.pre_present_notify();
@@ -360,7 +361,7 @@ mod tests {
             .get_mut(&egui::ViewportId::ROOT)
             .unwrap()
             .native_pixels_per_point = Some(scale);
-        let output = context.run_ui(input, draw);
+        let mut output = context.run_ui(input, draw);
         let primitives = context.tessellate(output.shapes, output.pixels_per_point);
         let side = (64.0 * scale) as usize;
         let mut pixels = vec![0xffff_ffff; side * side];
@@ -369,7 +370,7 @@ mod tests {
             &mut pixels,
             [side, side],
             &primitives,
-            &output.textures_delta,
+            &mut output.textures_delta,
             output.pixels_per_point,
         );
         pixels

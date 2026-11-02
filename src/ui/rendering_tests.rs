@@ -1,7 +1,7 @@
 use super::*;
 
 fn frame(app: &mut NativeApp, context: &egui::Context) -> egui::FullOutput {
-    context.run_ui(
+    let mut output = context.run_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 Pos2::ZERO,
@@ -10,7 +10,9 @@ fn frame(app: &mut NativeApp, context: &egui::Context) -> egui::FullOutput {
             ..Default::default()
         },
         |ui| app.show(ui),
-    )
+    );
+    output.textures_delta.clear();
+    output
 }
 
 fn titles(output: &egui::FullOutput) -> Vec<String> {
