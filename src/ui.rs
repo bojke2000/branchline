@@ -910,10 +910,15 @@ impl NativeApp {
             }
         });
         if let Some(id) = selected {
-            let result = self.edit(EditorEdit::Command(Command::Reveal { id }));
-            self.report(result);
-            self.focus_selected = true;
+            self.select_search_result(id);
         }
+    }
+
+    fn select_search_result(&mut self, id: NodeId) {
+        let is_root = id == self.workspace.map().editor.document.root;
+        let result = self.edit(EditorEdit::Command(Command::Reveal { id }));
+        self.report(result);
+        self.focus_selected = !is_root;
     }
 
     fn palette(&mut self, ctx: &egui::Context) {
@@ -1921,4 +1926,26 @@ fn screen_rect(viewport: Viewport, rect: Rect, center: Point) -> egui::Rect {
     let min = viewport.to_screen(rect.min, center);
     let max = viewport.to_screen(rect.max, center);
     egui::Rect::from_min_max(Pos2::new(min.x, min.y), Pos2::new(max.x, max.y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selecting_root_from_search_preserves_viewport() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryCoordinator::open(temp.path().into()).unwrap();
+        let mut app = NativeApp::new(store).unwrap();
+        app.workspace.map_mut().viewport.pan.y = 1_000.0;
+        let pan = app.workspace.map().viewport.pan;
+        let root = app.workspace.map().editor.document.root.clone();
+        app.select_search_result(root);
+
+        let context = egui::Context::default();
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| app.show(ui));
+        output.textures_delta.clear();
+
+        assert_eq!(app.workspace.map().viewport.pan, pan);
+    }
 }
