@@ -184,7 +184,7 @@ impl NativeApp {
                 }
             }
             self.edit(EditorEdit::Action(action))?;
-            self.focus_selected = true;
+            self.focus_selected = !matches!(action, EditorAction::Navigate(_));
             Ok(())
         })();
         self.report(result);
@@ -1931,6 +1931,7 @@ fn screen_rect(viewport: Viewport, rect: Rect, center: Point) -> egui::Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Direction;
 
     #[test]
     fn selecting_root_from_search_preserves_viewport() {
@@ -1946,6 +1947,27 @@ mod tests {
         let mut output = context.run_ui(egui::RawInput::default(), |ui| app.show(ui));
         output.textures_delta.clear();
 
+        assert_eq!(app.workspace.map().viewport.pan, pan);
+    }
+
+    #[test]
+    fn keyboard_navigation_preserves_viewport() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryCoordinator::open(temp.path().into()).unwrap();
+        let mut app = NativeApp::new(store).unwrap();
+        app.action(EditorAction::AddChild);
+        app.prepare().unwrap();
+        let root = app.workspace.map().editor.document.root.clone();
+        app.edit(EditorEdit::Select(root.clone())).unwrap();
+        app.workspace.map_mut().viewport.pan.x = -1_000.0;
+        let pan = app.workspace.map().viewport.pan;
+
+        app.action(EditorAction::Navigate(Direction::Right));
+        let mut output =
+            egui::Context::default().run_ui(egui::RawInput::default(), |ui| app.show(ui));
+        output.textures_delta.clear();
+
+        assert_ne!(app.workspace.map().editor.selected, root);
         assert_eq!(app.workspace.map().viewport.pan, pan);
     }
 }
