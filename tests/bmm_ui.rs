@@ -381,6 +381,87 @@ fn typing_replaces_the_active_label_once_with_cancel_commit_and_undo() {
 }
 
 #[test]
+fn platform_line_break_shortcut_keeps_node_text_multiline() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::Edit)
+        .unwrap();
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    render(&mut app, &ctx, vec![]);
+    render(&mut app, &ctx, vec![egui::Event::Text("first".into())]);
+
+    let modifiers = if cfg!(target_os = "macos") {
+        egui::Modifiers {
+            command: true,
+            mac_cmd: true,
+            ..Default::default()
+        }
+    } else {
+        egui::Modifiers {
+            alt: true,
+            ..Default::default()
+        }
+    };
+    render(
+        &mut app,
+        &ctx,
+        vec![
+            egui::Event::ModifiersChanged(modifiers),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            },
+        ],
+    );
+    assert_eq!(
+        app.workspace.map().editor.editing.as_ref().unwrap().text,
+        "first\n"
+    );
+    render(
+        &mut app,
+        &ctx,
+        vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            egui::Event::Text("second".into()),
+        ],
+    );
+    assert_eq!(
+        app.workspace.map().editor.editing.as_ref().unwrap().text,
+        "first\nsecond"
+    );
+
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    let editor = &app.workspace.map().editor;
+    assert!(editor.editing.is_none());
+    assert_eq!(
+        editor.document.nodes[&editor.document.root].text,
+        "first\nsecond"
+    );
+    assert!(
+        editor.document.nodes[&editor.document.root]
+            .children
+            .is_empty()
+    );
+}
+
+#[test]
 fn typing_stays_in_search_then_replaces_only_the_active_multiselected_node() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();

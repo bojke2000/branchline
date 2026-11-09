@@ -762,6 +762,10 @@ impl NativeApp {
                     for (key, purpose) in [
                         ("Tab", "Add child / commit and continue with a child"),
                         ("Enter", "Add sibling / commit text while editing"),
+                        (
+                            "Alt + Enter / Cmd + Enter on macOS",
+                            "Insert a line break in node text",
+                        ),
                         ("F2 or double-click", "Edit selected idea"),
                         ("Start typing", "Replace the active idea; Enter commits"),
                         ("Escape", "Cancel inline edit or close search/commands"),
@@ -1323,7 +1327,13 @@ impl NativeApp {
                         Some(EditorKey::Escape)
                     } else if input.key_pressed(Key::Tab) {
                         Some(EditorKey::Tab)
-                    } else if input.key_pressed(Key::Enter) {
+                    } else if input.key_pressed(Key::Enter)
+                        && !(if cfg!(target_os = "macos") {
+                            input.modifiers.mac_cmd
+                        } else {
+                            input.modifiers.alt
+                        })
+                    {
                         Some(EditorKey::Enter)
                     } else {
                         None
@@ -1410,6 +1420,7 @@ impl NativeApp {
                     .as_ref()
                     .expect("editing node");
                 let mut text = buffer.text.clone();
+                let edit_rows = text.lines().count().max(1);
                 if first_focus {
                     ui.memory_mut(|memory| memory.request_focus(inline_id));
                     let mut state = egui::text_edit::TextEditState::default();
@@ -1422,11 +1433,24 @@ impl NativeApp {
                     state.store(ui.ctx(), inline_id);
                     self.edit_focus = Some(id.clone());
                 }
+                if edit_key.is_some_and(|(key, _)| matches!(key, EditorKey::Enter)) {
+                    ui.input_mut(|input| input.consume_key(input.modifiers, Key::Enter));
+                }
+                let edit_rect = rect.shrink(7.0);
+                let edit_rect = egui::Rect::from_min_size(
+                    edit_rect.min,
+                    Vec2::new(
+                        edit_rect.width(),
+                        edit_rect.height().max(24.0 * zoom * edit_rows as f32),
+                    ),
+                );
                 let response = ui.put(
-                    rect.shrink(7.0),
-                    egui::TextEdit::singleline(&mut text)
+                    edit_rect,
+                    egui::TextEdit::multiline(&mut text)
                         .id(inline_id)
                         .font(FontId::proportional(18.0 * zoom))
+                        .desired_rows(edit_rows)
+                        .desired_width(edit_rect.width())
                         .char_limit(DRAFT_CHAR_PROBE_LIMIT),
                 );
                 if response.changed() {
