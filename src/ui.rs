@@ -1585,32 +1585,62 @@ impl NativeApp {
             self.report(result);
         }
         if let Some(id) = drag_started {
-            let result = self.edit(EditorEdit::Select(id.clone()));
-            if result.is_ok() {
-                if id == self.workspace.map().editor.document.root {
-                    if let Some(origin) = ui.input(|input| input.pointer.press_origin()) {
-                        self.drag = Some(CanvasDrag::Pan {
-                            origin: point(origin),
-                            initial_pan: self.workspace.map().viewport.pan,
-                        });
-                        self.status =
-                            "Repositioning the whole map. Escape restores the starting view."
-                                .into();
-                    } else {
-                        self.error = Some(
-                            "Cannot start map panning without the pointer's press position.".into(),
-                        );
-                    }
+            let editor = &self.workspace.map().editor;
+            let grouped = id != editor.document.root
+                && editor.is_selected(&id)
+                && editor.selection_count() > 1;
+            let whole_map = editor.selection_coverage() == crate::app::SelectionCoverage::WholeMap;
+            let sources = if grouped {
+                editor.deletion_plan().map(|plan| plan.roots)
+            } else {
+                Ok(vec![id.clone()])
+            };
+            let result = sources.and_then(|sources| {
+                if grouped && whole_map {
+                    self.prepare()?;
                 } else {
-                    self.drag = Some(CanvasDrag::Branch(DragSession::new(
-                        &self.workspace.map().editor.document,
-                        id,
-                        self.workspace.map().editor.revision,
-                    )));
-                    self.status = "Drag to the middle of a topic for a child, or its top/bottom to reorder. Escape cancels.".into();
+                    self.edit(if grouped {
+                        EditorEdit::ActivateSelection(id.clone())
+                    } else {
+                        EditorEdit::Select(id.clone())
+                    })?;
                 }
+                Ok(sources)
+            });
+            match result {
+                Ok(sources) => {
+                    if id == self.workspace.map().editor.document.root {
+                        if let Some(origin) = ui.input(|input| input.pointer.press_origin()) {
+                            self.drag = Some(CanvasDrag::Pan {
+                                origin: point(origin),
+                                initial_pan: self.workspace.map().viewport.pan,
+                            });
+                            self.status =
+                                "Repositioning the whole map. Escape restores the starting view."
+                                    .into();
+                        } else {
+                            self.error = Some(
+                                "Cannot start map panning without the pointer's press position."
+                                    .into(),
+                            );
+                        }
+                    } else {
+                        self.drag = Some(CanvasDrag::Branch(DragSession::new(
+                            &self.workspace.map().editor.document,
+                            id,
+                            sources,
+                            grouped,
+                            self.workspace.map().editor.revision,
+                        )));
+                        self.status = if grouped {
+                            "Drag onto a topic to move the selected branches inside it. Escape cancels."
+                        } else {
+                            "Drag to the middle of a topic for a child, or its top/bottom to reorder. Escape cancels."
+                        }.into();
+                    }
+                }
+                Err(error) => self.report(Err(error)),
             }
-            self.report(result);
         }
         self.update_drag(ui, available, center);
         canvas_response.context_menu(|ui| {
@@ -1690,14 +1720,24 @@ impl NativeApp {
             match drag.preview {
                 Some(preview) if preview.rejection.is_none() => {
                     let before = self.workspace.map().editor.revision;
-                    let result = self.edit(EditorEdit::Command(Command::MoveNode {
-                        id: drag.source,
-                        placement: preview.placement,
-                    }));
+                    let command = if drag.grouped {
+                        Command::MoveNodes {
+                            ids: drag.sources,
+                            parent: preview.target,
+                        }
+                    } else {
+                        Command::MoveNode {
+                            id: drag.source,
+                            placement: preview.placement,
+                        }
+                    };
+                    let result = self.edit(EditorEdit::Command(command));
                     if result.is_ok() {
                         self.focus_selected = true;
                         self.status = if before == self.workspace.map().editor.revision {
                             "Already in that position."
+                        } else if drag.grouped {
+                            "Selected branches moved. Undo restores their previous positions."
                         } else {
                             "Branch moved. Undo restores its previous position."
                         }
@@ -1707,9 +1747,12 @@ impl NativeApp {
                 }
                 Some(preview) => self.error = preview.rejection,
                 None => {
-                    self.status =
+                    self.status = if drag.grouped {
+                        "Move canceled: drop the selected branches onto a topic."
+                    } else {
                         "Move canceled: drop near a topic, or across the root to switch sides."
-                            .into()
+                    }
+                    .into()
                 }
             }
             return;

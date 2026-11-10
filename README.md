@@ -161,8 +161,11 @@ Shift+click toggles individual nodes; an ordinary click starts a single selectio
 Right-clicking a selected node preserves the group. Delete removes the union of
 the selected subtrees, without counting overlapping selections twice, and one
 undo restores the deletion. If the central root is included, the confirmation
-explicitly says it will be kept. Other commands operate on the active node;
-dragging selects and moves only the grabbed branch, not the whole group.
+explicitly says it will be kept. Other commands operate on the active node. Dragging a selected topic onto another
+topic moves all selected branches into it as children in one undo step. Selected
+descendants stay inside their selected ancestor rather than being moved twice.
+The central root stays fixed, and drops into a moved branch are rejected.
+Dragging an unselected topic still selects and moves only that branch.
 
 ### Hierarchical clipboard
 

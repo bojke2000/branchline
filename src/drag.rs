@@ -29,6 +29,8 @@ impl DropPreview {
 
 pub(crate) struct DragSession {
     pub source: NodeId,
+    pub sources: Vec<NodeId>,
+    pub grouped: bool,
     pub revision: u64,
     pub title: String,
     pub preview: Option<DropPreview>,
@@ -36,7 +38,13 @@ pub(crate) struct DragSession {
 }
 
 impl DragSession {
-    pub fn new(doc: &Document, source: NodeId, revision: u64) -> Self {
+    pub fn new(
+        doc: &Document,
+        source: NodeId,
+        sources: Vec<NodeId>,
+        grouped: bool,
+        revision: u64,
+    ) -> Self {
         let mut characters = doc.nodes[&source].text.chars();
         let mut title: String = characters
             .by_ref()
@@ -46,9 +54,14 @@ impl DragSession {
         if characters.next().is_some() {
             title.push_str("...");
         }
+        if grouped {
+            title = format!("{} selected branch(es)", sources.len());
+        }
         let top_level = doc.parent(&source) == Some(doc.root.as_str());
         Self {
             source,
+            sources,
+            grouped,
             revision,
             title,
             preview: None,
@@ -69,10 +82,12 @@ impl DragSession {
             return;
         }
         self.preview = candidate.map(|(target, placement)| {
-            let rejection = doc
-                .plan_move(&self.source, &placement)
-                .err()
-                .map(|error| error.to_string());
+            let validation = if self.grouped {
+                doc.plan_move_many(&self.sources, &target).map(|_| ())
+            } else {
+                doc.plan_move(&self.source, &placement).map(|_| ())
+            };
+            let rejection = validation.err().map(|error| error.to_string());
             DropPreview {
                 target,
                 placement,
@@ -99,7 +114,9 @@ impl DragSession {
             .filter(|(_, rect)| distance(rect) <= snap * snap)
             .min_by(|(_, a), (_, b)| distance(a).total_cmp(&distance(b)))
         {
-            let placement = if id == &doc.root {
+            let placement = if self.grouped {
+                MovePlacement::Child(id.clone())
+            } else if id == &doc.root {
                 MovePlacement::RootSide(if pointer.x < rect.center().x {
                     Side::Left
                 } else {
@@ -117,7 +134,7 @@ impl DragSession {
             };
             return Some((id.clone(), placement));
         }
-        if self.top_level {
+        if self.top_level && !self.grouped {
             let root = layout.nodes[&doc.root];
             let side = if pointer.x < root.center().x {
                 Side::Left

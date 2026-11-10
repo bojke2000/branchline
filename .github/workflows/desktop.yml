@@ -39,3 +39,7 @@ jobs:
         run: cargo build --release --locked
       - name: Test tab input, file operations and recovery
         run: cargo test --release --locked --lib --test workspace --test tabs_ui --test clipboard_ui
+      - name: Test document edits and drag interactions
+        run: |
+          cargo test --release --locked --test document
+          cargo test --release --locked --test bmm_ui drag

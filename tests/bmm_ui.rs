@@ -906,6 +906,136 @@ fn release_drag(app: &mut NativeApp, ctx: &egui::Context, to: Pos2) {
 }
 
 #[test]
+fn dragging_selected_nodes_moves_the_group_as_children_and_undoes_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    let root = app.workspace.map().editor.document.root.clone();
+    let first = add_drag_topic(&mut app, &root, "Group first");
+    let nested = add_drag_topic(&mut app, &first, "Group nested");
+    let second = add_drag_topic(&mut app, &root, "Group second");
+    let target = add_drag_topic(&mut app, &root, "Group target");
+    let existing = add_drag_topic(&mut app, &target, "Existing child");
+    app.workspace
+        .map_mut()
+        .editor
+        .execute(branchline::document::Command::ToggleFold { id: target.clone() })
+        .unwrap();
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    let shapes = render(&mut app, &ctx, vec![]);
+    click(
+        &mut app,
+        &ctx,
+        text_center(&shapes, "Group first").unwrap(),
+        egui::PointerButton::Primary,
+    );
+    for label in ["Group nested", "Group second"] {
+        let shapes = render(&mut app, &ctx, vec![]);
+        click_with_modifiers(
+            &mut app,
+            &ctx,
+            text_center(&shapes, label).unwrap(),
+            egui::PointerButton::Primary,
+            egui::Modifiers::SHIFT,
+        );
+    }
+    let before = app.workspace.map().editor.document.clone();
+    let generation = app.workspace.map().editor.history.generation;
+    let shapes = render(&mut app, &ctx, vec![]);
+    let to = text_center(&shapes, "Group target").unwrap() - egui::vec2(0.0, 20.0);
+    let preview = begin_drag(
+        &mut app,
+        &ctx,
+        text_center(&shapes, "Group nested").unwrap(),
+        to,
+    );
+    assert_eq!(app.workspace.map().editor.selection_count(), 3);
+    assert_eq!(app.workspace.map().editor.document, before);
+    assert!(text_center(&preview, "Move inside topic (unfolds branch)").is_some());
+    release_drag(&mut app, &ctx, to);
+    let editor = &app.workspace.map().editor;
+    assert_eq!(
+        editor.document.nodes[&target].children,
+        [existing, first.clone(), second.clone()]
+    );
+    assert_eq!(editor.document.parent(&nested), Some(first.as_str()));
+    assert_eq!(editor.selection_count(), 3);
+    assert_eq!(editor.history.generation, generation + 1);
+    app.workspace
+        .map_mut()
+        .editor
+        .dispatch(EditorAction::Undo)
+        .unwrap();
+    assert_eq!(app.workspace.map().editor.document, before);
+}
+
+#[test]
+fn grouped_drag_rejects_cycles_and_escape_cancels_the_entire_group() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    let root = app.workspace.map().editor.document.root.clone();
+    let first = add_drag_topic(&mut app, &root, "Cycle first");
+    add_drag_topic(&mut app, &first, "Cycle nested");
+    let second = add_drag_topic(&mut app, &root, "Cycle second");
+    add_drag_topic(&mut app, &root, "Safe target");
+    app.workspace.map_mut().editor.select(&first).unwrap();
+    app.workspace
+        .map_mut()
+        .editor
+        .toggle_selection(&second)
+        .unwrap();
+    let before = app.workspace.map().editor.document.clone();
+    let generation = app.workspace.map().editor.history.generation;
+    let ctx = egui::Context::default();
+    render(&mut app, &ctx, vec![]);
+    let shapes = render(&mut app, &ctx, vec![]);
+    let to = text_center(&shapes, "Cycle nested").unwrap();
+    begin_drag(
+        &mut app,
+        &ctx,
+        text_center(&shapes, "Cycle second").unwrap(),
+        to,
+    );
+    release_drag(&mut app, &ctx, to);
+    assert_eq!(app.workspace.map().editor.document, before);
+    assert_eq!(app.workspace.map().editor.history.generation, generation);
+    let shapes = render(&mut app, &ctx, vec![]);
+    let to = text_center(&shapes, "Safe target").unwrap();
+    begin_drag(
+        &mut app,
+        &ctx,
+        text_center(&shapes, "Cycle second").unwrap(),
+        to,
+    );
+    render(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    release_drag(&mut app, &ctx, to);
+    assert_eq!(app.workspace.map().editor.document, before);
+    assert_eq!(app.workspace.map().editor.history.generation, generation);
+}
+
+fn add_drag_topic(app: &mut NativeApp, parent: &str, text: &str) -> String {
+    app.workspace
+        .map_mut()
+        .editor
+        .execute(branchline::document::Command::AddChild {
+            parent: parent.into(),
+            text: text.into(),
+        })
+        .unwrap();
+    app.workspace.map().editor.selected.clone()
+}
+
+#[test]
 fn dragging_previews_without_mutation_then_moves_and_undoes_a_subtree() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();

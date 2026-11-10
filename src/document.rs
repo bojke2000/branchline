@@ -373,36 +373,103 @@ impl Document {
         Ok(Some(id))
     }
 
-    pub fn plan_deletion(&self, ids: &[NodeId]) -> Result<DeletionPlan, DocumentError> {
+    fn selection_roots(&self, ids: &[NodeId]) -> Result<Vec<NodeId>, DocumentError> {
         let mut selected: BTreeSet<_> = ids.iter().cloned().collect();
         if selected.iter().any(|id| !self.nodes.contains_key(id)) {
             return Err(DocumentError("Selection includes an unknown node".into()));
         }
-        let root_retained = selected.remove(&self.root);
-        if selected.is_empty() {
+        selected.remove(&self.root);
+        let mut roots = Vec::new();
+        let mut pending = vec![self.root.clone()];
+        while let Some(id) = pending.pop() {
+            if selected.contains(&id) {
+                roots.push(id);
+            } else {
+                pending.extend(self.nodes[&id].children.iter().rev().cloned());
+            }
+        }
+        Ok(roots)
+    }
+
+    pub fn plan_move_many(
+        &self,
+        ids: &[NodeId],
+        parent: &str,
+    ) -> Result<Vec<NodeId>, DocumentError> {
+        let roots = self.selection_roots(ids)?;
+        if roots.is_empty() {
+            return Err(DocumentError("Select a non-root branch to move".into()));
+        }
+        if !self.nodes.contains_key(parent) {
+            return Err(DocumentError("Unknown destination".into()));
+        }
+        let parents = self.parent_index();
+        let mut ancestor = parent;
+        let mut ancestors = BTreeSet::new();
+        loop {
+            ancestors.insert(ancestor);
+            match parents.get(ancestor) {
+                Some(parent) => ancestor = parent,
+                None => break,
+            }
+        }
+        if roots.iter().any(|id| ancestors.contains(id.as_str())) {
+            return Err(DocumentError(
+                "A branch cannot be moved into itself or its descendants".into(),
+            ));
+        }
+        let mut pending: Vec<_> = roots.iter().map(|id| (id.as_str(), 1)).collect();
+        while let Some((id, height)) = pending.pop() {
+            if ancestors.len() + height > MAX_DEPTH {
+                return Err(DocumentError(
+                    "Move would exceed maximum tree depth of 256".into(),
+                ));
+            }
+            pending.extend(
+                self.nodes[id]
+                    .children
+                    .iter()
+                    .map(|child| (child.as_str(), height + 1)),
+            );
+        }
+        Ok(roots)
+    }
+
+    fn move_many(
+        &mut self,
+        ids: Vec<NodeId>,
+        parent: NodeId,
+    ) -> Result<Option<NodeId>, DocumentError> {
+        let roots = self.plan_move_many(&ids, &parent)?;
+        let moved: BTreeSet<_> = roots.iter().cloned().collect();
+        for node in self.nodes.values_mut() {
+            node.children.retain(|child| !moved.contains(child));
+        }
+        let destination = self.node_mut(&parent)?;
+        destination.children.extend(roots.iter().cloned());
+        destination.folded = false;
+        let inherited_side = (parent != self.root).then_some(self.nodes[&parent].side);
+        for id in roots {
+            if let Some(side) = inherited_side {
+                self.set_subtree_side(&id, side)?;
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn plan_deletion(&self, ids: &[NodeId]) -> Result<DeletionPlan, DocumentError> {
+        let roots = self.selection_roots(ids)?;
+        if roots.is_empty() {
             return Err(DocumentError(
                 "The central idea cannot be deleted; select another idea".into(),
             ));
         }
-        let mut roots = Vec::new();
+        let root_retained = ids.contains(&self.root);
         let mut removed = BTreeSet::new();
-        let mut pending = vec![(self.root.clone(), false)];
-        while let Some((id, selected_ancestor)) = pending.pop() {
-            let selected_here = selected.contains(&id);
-            if selected_here && !selected_ancestor {
-                roots.push(id.clone());
-            }
-            let remove = selected_ancestor || selected_here;
-            pending.extend(
-                self.nodes[&id]
-                    .children
-                    .iter()
-                    .rev()
-                    .map(|child| (child.clone(), remove)),
-            );
-            if remove {
-                removed.insert(id);
-            }
+        let mut pending = roots.clone();
+        while let Some(id) = pending.pop() {
+            pending.extend(self.nodes[&id].children.iter().cloned());
+            removed.insert(id);
         }
         Ok(DeletionPlan {
             roots,
@@ -554,6 +621,7 @@ impl Document {
             Command::Delete { id } => self.delete_many(vec![id]),
             Command::DeleteMany { ids } => self.delete_many(ids),
             Command::MoveNode { id, placement } => self.move_node(id, placement),
+            Command::MoveNodes { ids, parent } => self.move_many(ids, parent),
             Command::MoveSibling { id, delta } => {
                 let parent = self.parent_owned(&id)?;
                 let children = self.siblings_on_side(&id, &parent);
@@ -784,6 +852,10 @@ pub enum Command {
     MoveNode {
         id: NodeId,
         placement: MovePlacement,
+    },
+    MoveNodes {
+        ids: Vec<NodeId>,
+        parent: NodeId,
     },
 }
 

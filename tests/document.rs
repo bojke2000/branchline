@@ -279,6 +279,214 @@ fn moving_a_folded_subtree_preserves_content_and_is_one_undo_step() {
 }
 
 #[test]
+fn grouped_moves_keep_subtrees_in_document_order_and_undo_atomically() {
+    let mut doc = Document::new("root");
+    let mut setup = History::default();
+    let root = doc.root.clone();
+    let first = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: root.clone(),
+            text: "First".into(),
+        },
+    );
+    let child = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: first.clone(),
+            text: "Nested".into(),
+        },
+    );
+    let second = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: root.clone(),
+            text: "Second".into(),
+        },
+    );
+    let target = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: root.clone(),
+            text: "Target".into(),
+        },
+    );
+    let existing = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: target.clone(),
+            text: "Existing".into(),
+        },
+    );
+    doc.nodes.get_mut(&first).unwrap().folded = true;
+    doc.nodes.get_mut(&target).unwrap().folded = true;
+    doc.nodes.get_mut(&child).unwrap().notes = "Keep notes".into();
+    let before = doc.clone();
+    let mut history = History::default();
+    history
+        .execute(
+            &mut doc,
+            Command::MoveNodes {
+                ids: vec![
+                    second.clone(),
+                    child.clone(),
+                    first.clone(),
+                    root.clone(),
+                    first.clone(),
+                ],
+                parent: target.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        doc.nodes[&target].children,
+        [existing, first.clone(), second.clone()]
+    );
+    assert_eq!(
+        doc.nodes[&root].children.as_slice(),
+        std::slice::from_ref(&target)
+    );
+    assert_eq!(doc.parent(&child), Some(first.as_str()));
+    assert!(doc.nodes[&first].folded);
+    assert!(!doc.nodes[&target].folded);
+    assert_eq!(doc.nodes[&child].notes, "Keep notes");
+    for id in [&first, &second, &child] {
+        assert_eq!(doc.nodes[id].side, doc.nodes[&target].side);
+    }
+    let after = doc.clone();
+    assert_eq!(history.generation, 1);
+    assert!(history.undo(&mut doc));
+    assert_eq!(doc, before);
+    assert!(!history.undo(&mut doc));
+    assert!(history.redo(&mut doc));
+    assert_eq!(doc, after);
+}
+
+#[test]
+fn grouped_moves_reject_invalid_members_and_cycles_without_partial_mutation() {
+    let mut doc = Document::new("root");
+    let mut setup = History::default();
+    let root = doc.root.clone();
+    let first = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: root.clone(),
+            text: "First".into(),
+        },
+    );
+    let child = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: first.clone(),
+            text: "Nested".into(),
+        },
+    );
+    let second = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: root.clone(),
+            text: "Second".into(),
+        },
+    );
+    let before = doc.clone();
+    let mut history = History::default();
+    for (ids, parent) in [
+        (vec![second.clone(), first.clone()], child),
+        (vec![second.clone(), first.clone()], first.clone()),
+        (vec![second.clone(), "missing".into()], first.clone()),
+        (vec![second, first], "missing".into()),
+        (vec![root.clone()], root.clone()),
+        (vec![], root),
+    ] {
+        assert!(
+            history
+                .execute(&mut doc, Command::MoveNodes { ids, parent })
+                .is_err()
+        );
+        assert_eq!(doc, before);
+        assert_eq!(history.generation, 0);
+    }
+    assert!(!history.undo(&mut doc));
+}
+
+#[test]
+fn grouped_moves_check_the_depth_of_every_selected_subtree_before_moving() {
+    use branchline::document::MAX_DEPTH;
+    let mut doc = Document::new("root");
+    let mut setup = History::default();
+    let root = doc.root.clone();
+    let leaf = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: root.clone(),
+            text: "Leaf".into(),
+        },
+    );
+    let branch = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: root.clone(),
+            text: "Branch".into(),
+        },
+    );
+    let nested = execute(
+        &mut doc,
+        &mut setup,
+        Command::AddChild {
+            parent: branch.clone(),
+            text: "Nested".into(),
+        },
+    );
+    let mut target = root;
+    for _ in 1..MAX_DEPTH - 1 {
+        target = execute(
+            &mut doc,
+            &mut setup,
+            Command::AddChild {
+                parent: target,
+                text: "Deep target".into(),
+            },
+        );
+    }
+    let before = doc.clone();
+    let mut history = History::default();
+    assert!(
+        history
+            .execute(
+                &mut doc,
+                Command::MoveNodes {
+                    ids: vec![leaf.clone(), branch.clone()],
+                    parent: target.clone(),
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(doc, before);
+    assert_eq!(history.generation, 0);
+    history
+        .execute(
+            &mut doc,
+            Command::MoveNodes {
+                ids: vec![leaf.clone(), nested.clone()],
+                parent: target.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(doc.nodes[&target].children, [leaf, nested]);
+    doc.validate().unwrap();
+}
+
+#[test]
 fn moves_reject_cycles_roots_and_unknown_destinations_transactionally() {
     let mut doc = Document::new("root");
     let mut setup = History::default();
