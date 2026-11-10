@@ -27,6 +27,11 @@ enum CanvasDrag {
 }
 
 enum Dialog {
+    Rename {
+        session: SessionId,
+        name: String,
+        focus: bool,
+    },
     CloseDecision(SessionId),
     Paste(paste::PendingPaste),
     CopyOutline(crate::outline_format::OutlineCopy),
@@ -51,6 +56,8 @@ mod recovery;
 #[cfg(test)]
 mod rendering_tests;
 mod tabs;
+#[cfg(test)]
+mod tabs_tests;
 mod workspace_dialogs;
 
 // Even a clipped proposal must exceed the byte limit and fail atomic admission.
@@ -655,7 +662,7 @@ impl NativeApp {
             )
             .show(root_ui, |ui| self.toolbar(ui, blocked));
         self.tab_strip(root_ui, blocked);
-        let palette_events = if self.palette_open {
+        let overlay_events = if self.palette_open || self.dialog.is_some() {
             ctx.input_mut(|input| {
                 let (text, other) = std::mem::take(&mut input.events)
                     .into_iter()
@@ -675,20 +682,6 @@ impl NativeApp {
         } else {
             Vec::new()
         };
-        if self.dialog.is_some() {
-            ctx.input_mut(|input| {
-                input.events.retain(|event| {
-                    !matches!(
-                        event,
-                        egui::Event::Text(_)
-                            | egui::Event::Paste(_)
-                            | egui::Event::Copy
-                            | egui::Event::Cut
-                            | egui::Event::Ime(_)
-                    )
-                })
-            });
-        }
         egui::Panel::bottom("status").show(root_ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -741,7 +734,9 @@ impl NativeApp {
                 self.canvas(ui)
             });
         });
-        ctx.input_mut(|input| input.events.extend(palette_events));
+        if self.palette_open || matches!(self.dialog, Some(Dialog::Rename { .. })) {
+            ctx.input_mut(|input| input.events.extend(overlay_events));
+        }
         if !blocked {
             self.palette(&ctx);
         }
@@ -1837,6 +1832,9 @@ impl NativeApp {
         egui::Modal::new(Id::unique("file-dialog")).show(ctx, |ui| {
             ui.set_width(470.0);
             match &mut dialog {
+                Dialog::Rename { session, name, focus } => {
+                    keep = self.rename_dialog(ui, *session, name, focus);
+                }
                 Dialog::MermaidExport { session, bytes } => {
                     ui.heading("Export Mermaid mindmap");
                     ui.label("Exports the captured labels and complete hierarchy, including unfinished text and folded topics. Notes, links, IDs, styling and BMM layout do not transfer. Mermaid determines presentation; the native map and its edit history stay unchanged.");

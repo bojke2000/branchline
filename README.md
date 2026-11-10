@@ -217,6 +217,9 @@ sibling and atomic replacement. Save As and export explicitly confirm existing
 destinations. New and Open add independent tabs without replacing an existing
 map or committing its unfinished text. Failed/cancelled saves retain that work.
 Cmd/Ctrl+W closes the targeted tab; Ctrl+Tab / Ctrl+Shift+Tab cycle tabs.
+Right-click a tab and choose **Rename...** to rename its `.branchline` file
+in the same folder without saving unfinished edits or changing the root label.
+Existing filenames are never overwritten; untitled maps use Save As instead.
 Closing a dirty tab offers Save / Discard / Cancel. Quit asks about dirty maps
 in tab order without removing them: canceling a later prompt keeps every tab,
 including earlier pending discards, while successful earlier saves stay saved.

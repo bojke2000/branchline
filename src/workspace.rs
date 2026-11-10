@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, path::Path};
 use thiserror::Error;
 
 mod lifecycle;
+mod rename;
 use lifecycle::Transition;
 pub use lifecycle::{CloseDecision, TransitionProgress};
 

@@ -6,6 +6,106 @@ use branchline::{
 };
 
 #[test]
+fn rename_moves_file_without_saving_unfinished_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = temp.path().join("old.branchline");
+    let new = temp.path().join("new.branchline");
+    let mut workspace = Workspace::new();
+    let id = workspace.active_id();
+    workspace.save(id, &old).unwrap();
+    let bytes = std::fs::read(&old).unwrap();
+    let root = workspace.map().editor.selected.clone();
+    workspace
+        .apply(
+            id,
+            EditorEdit::Command(branchline::document::Command::SetText {
+                id: root.clone(),
+                text: "Unsaved change".into(),
+            }),
+        )
+        .unwrap();
+    workspace
+        .apply(id, EditorEdit::Action(EditorAction::Edit))
+        .unwrap();
+    workspace
+        .apply(
+            id,
+            EditorEdit::SetDraft {
+                field: DraftField::Inline(root),
+                text: "Unfinished draft".into(),
+            },
+        )
+        .unwrap();
+    let before = workspace.map().editor.document.clone();
+    let generation = workspace.map().editor.history.generation;
+    let other = workspace.new_map().unwrap();
+    workspace.apply_pending_activation().unwrap();
+
+    workspace.rename_file(id, "new.branchline").unwrap();
+
+    assert!(!old.exists());
+    assert_eq!(std::fs::read(&new).unwrap(), bytes);
+    assert_eq!(workspace.active_id(), other);
+    let editor = &workspace.session(id).unwrap().editor;
+    assert_eq!(editor.path.as_ref(), Some(&new));
+    assert_eq!(editor.document, before);
+    assert_eq!(editor.history.generation, generation);
+    assert!(editor.is_dirty());
+    assert_eq!(editor.editing.as_ref().unwrap().text, "Unfinished draft");
+    workspace.save(id, &new).unwrap();
+    assert!(!old.exists());
+    assert!(
+        String::from_utf8(std::fs::read(&new).unwrap())
+            .unwrap()
+            .contains("Unfinished draft")
+    );
+}
+
+#[test]
+fn rename_rejects_conflicts_and_invalid_filenames_without_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = temp.path().join("old.branchline");
+    let existing = temp.path().join("existing.branchline");
+    let mut workspace = Workspace::new();
+    let id = workspace.active_id();
+    workspace.save(id, &old).unwrap();
+    let bytes = std::fs::read(&old).unwrap();
+    std::fs::write(&existing, b"keep me").unwrap();
+    for name in [
+        "existing.branchline",
+        "",
+        "../outside.branchline",
+        "dir/new.branchline",
+        "dir\\new.branchline",
+        "wrong.txt",
+        ".",
+        "..",
+    ] {
+        assert!(workspace.rename_file(id, name).is_err(), "{name}");
+        assert_eq!(workspace.map().editor.path.as_ref(), Some(&old));
+        assert_eq!(std::fs::read(&old).unwrap(), bytes);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep me");
+    }
+    workspace.rename_file(id, "old.branchline").unwrap();
+}
+
+#[test]
+fn rename_rejects_externally_replaced_source_and_unsaved_map() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = temp.path().join("old.branchline");
+    let new = temp.path().join("new.branchline");
+    let mut workspace = Workspace::new();
+    let id = workspace.active_id();
+    assert!(workspace.rename_file(id, "new.branchline").is_err());
+    workspace.save(id, &old).unwrap();
+    branchline::storage::atomic_write(&old, b"external replacement").unwrap();
+    assert!(workspace.rename_file(id, "new.branchline").is_err());
+    assert_eq!(std::fs::read(&old).unwrap(), b"external replacement");
+    assert!(!new.exists());
+    assert_eq!(workspace.map().editor.path.as_ref(), Some(&old));
+}
+
+#[test]
 fn session_snapshot_preserves_drafts_without_committing() {
     let mut session = MapSession::new_blank(SessionId::new());
     let root = session.editor.document.root.clone();
