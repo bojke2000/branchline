@@ -83,6 +83,12 @@ impl NativeApp {
             && self.dialog.is_none()
             && !self.palette_open
             && !egui::Popup::is_any_open(ui.ctx())
+            && !ui.input(|input| {
+                input.pointer.button_down(egui::PointerButton::Secondary)
+                    || input
+                        .pointer
+                        .button_released(egui::PointerButton::Secondary)
+            })
             && self.workspace.pending_activation().is_none()
             && self.pending_close.is_none()
             && !self.pending_quit

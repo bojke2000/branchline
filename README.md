@@ -167,6 +167,25 @@ descendants stay inside their selected ancestor rather than being moved twice.
 The central root stays fixed, and drops into a moved branch are rejected.
 Dragging an unselected topic still selects and moves only that branch.
 
+Shift+drag blank canvas to select visible topics touched by a rectangle.
+Cmd/Ctrl+Shift+drag adds them to the selection. Escape, loss of window focus or
+release outside the canvas cancels the rectangle; ordinary blank-canvas dragging
+still pans the map. An empty rectangle keeps the previous selection.
+
+### Branch focus
+
+Right-click a topic and choose **Focus branch**, or use that command in the
+command palette, to hide everything outside its subtree. Breadcrumbs above the
+canvas let you focus an ancestor or return to **Full map**, which restores your
+previous pan and zoom. Focus is independent in each tab and does not change the
+document, folding, unfinished text or undo history.
+
+Select All is scoped to the focused branch. Copy and Delete still include the
+selected topics' folded descendants. Drops onto the focus root stay inside that
+branch. Search or navigation to an outside topic, or deleting the focused branch,
+returns to the full map. Branch focus is temporary; restarting restores the full
+map's view.
+
 ### Hierarchical clipboard
 
 Physical Ctrl and Cmd both work for A/C/V on macOS. Text fields keep their

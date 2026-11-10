@@ -22,8 +22,17 @@ use std::{
 };
 
 enum CanvasDrag {
-    Pan { origin: Point, initial_pan: Point },
+    Pan {
+        origin: Point,
+        initial_pan: Point,
+    },
     Branch(DragSession),
+    Selection {
+        origin: Pos2,
+        current: Pos2,
+        additive: bool,
+        revision: u64,
+    },
 }
 
 enum Dialog {
@@ -48,6 +57,9 @@ enum Dialog {
     },
 }
 
+#[cfg(test)]
+mod canvas_tests;
+mod canvas_tools;
 mod details;
 #[cfg(test)]
 mod mermaid_tests;
@@ -178,7 +190,9 @@ impl NativeApp {
     fn edit(&mut self, edit: EditorEdit) -> Result<(), EditorError> {
         self.workspace
             .apply(self.workspace.active_id(), edit)
-            .map_err(EditorError::from)
+            .map_err(EditorError::from)?;
+        self.reconcile_branch_focus();
+        Ok(())
     }
 
     fn action(&mut self, action: EditorAction) {
@@ -211,7 +225,7 @@ impl NativeApp {
                 self.begin_paste(true, None);
             }
             AppCommand::SelectAll => {
-                let result = self.edit(EditorEdit::SelectAll);
+                let result = self.select_scope();
                 self.report(result);
             }
             AppCommand::New => {
@@ -270,6 +284,11 @@ impl NativeApp {
                     self.workspace.map_mut().viewport.focus(rect.center());
                 }
             }
+            AppCommand::FocusBranch => {
+                let result = self.focus_branch(self.workspace.map().editor.selected.clone());
+                self.report(result);
+            }
+            AppCommand::ShowFullMap => self.show_full_map(),
             AppCommand::PanLeft => self.workspace.map_mut().viewport.pan.x -= 40.0,
             AppCommand::PanRight => self.workspace.map_mut().viewport.pan.x += 40.0,
             AppCommand::PanUp => self.workspace.map_mut().viewport.pan.y -= 40.0,
@@ -285,6 +304,18 @@ impl NativeApp {
     }
 
     fn command_enabled(&self, command: AppCommand, target: &NodeId) -> bool {
+        if command == AppCommand::FocusBranch {
+            return target != &self.workspace.map().editor.document.root
+                && self
+                    .workspace
+                    .map()
+                    .branch_focus
+                    .as_ref()
+                    .is_none_or(|focus| &focus.root != target);
+        }
+        if command == AppCommand::ShowFullMap {
+            return self.workspace.map().branch_focus.is_some();
+        }
         if command == AppCommand::Delete
             && self.workspace.map().editor.selection_coverage()
                 == crate::app::SelectionCoverage::WholeMap
@@ -372,6 +403,8 @@ impl NativeApp {
                 AppCommand::AddSibling,
                 AppCommand::Edit,
                 AppCommand::Fold,
+                AppCommand::FocusBranch,
+                AppCommand::ShowFullMap,
             ],
             target,
         );
@@ -784,6 +817,15 @@ impl NativeApp {
                         ("Drag a topic", "Preview a branch move; Escape cancels"),
                         ("Shift + click", "Toggle nodes in the selection"),
                         (
+                            "Shift + drag blank canvas",
+                            "Select ideas inside a rectangle",
+                        ),
+                        ("Cmd/Ctrl + Shift + drag", "Add ideas to the selection"),
+                        (
+                            "Focus branch / Full map",
+                            "Isolate a branch / restore the full view",
+                        ),
+                        (
                             "Delete / Backspace",
                             "Delete selected branches; one undo restores them",
                         ),
@@ -976,6 +1018,7 @@ impl NativeApp {
         if self.drag.is_some() {
             if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape)) {
                 self.cancel_canvas_drag();
+                ctx.stop_dragging();
                 self.status = "Drag canceled. The map was not changed.".into();
             }
             return;
@@ -1141,6 +1184,8 @@ impl NativeApp {
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
+        self.reconcile_branch_focus();
+        self.focus_breadcrumbs(ui);
         let available = ui.available_rect_before_wrap();
         let dark = ui.visuals().dark_mode;
         let background = if dark {
@@ -1151,10 +1196,46 @@ impl NativeApp {
         ui.painter().rect_filled(available, 0.0, background);
         let canvas_response = ui.allocate_rect(available, Sense::click_and_drag());
         let center = point(available.center());
-        if matches!(self.drag, Some(CanvasDrag::Pan { .. })) {
+        let selecting_canvas = canvas_response.drag_started_by(egui::PointerButton::Primary)
+            && ui.input(|input| input.modifiers.shift);
+        if selecting_canvas
+            && self.drag.is_none()
+            && let Some(origin) = ui.input(|input| input.pointer.press_origin())
+        {
+            let result = self.prepare();
+            match result {
+                Ok(()) => {
+                    self.drag = Some(CanvasDrag::Selection {
+                        origin,
+                        current: ui
+                            .input(|input| input.pointer.interact_pos())
+                            .unwrap_or(origin),
+                        additive: ui.input(|input| {
+                            input.modifiers.command
+                                || input.modifiers.ctrl
+                                || input.modifiers.mac_cmd
+                        }),
+                        revision: self.workspace.map().editor.revision,
+                    });
+                    self.status = "Drag a rectangle to select ideas. Escape cancels.".into();
+                }
+                Err(error) => {
+                    ui.ctx().stop_dragging();
+                    self.report(Err(error));
+                }
+            }
+        }
+        let canvas_drag_active = self.drag.is_some() || selecting_canvas;
+        if matches!(
+            self.drag,
+            Some(CanvasDrag::Pan { .. } | CanvasDrag::Selection { .. })
+        ) {
             self.update_drag(ui, available, center);
         }
-        if canvas_response.dragged_by(egui::PointerButton::Primary) && self.drag.is_none() {
+        if canvas_response.dragged_by(egui::PointerButton::Primary)
+            && self.drag.is_none()
+            && !canvas_drag_active
+        {
             let delta = ui.input(|input| input.pointer.delta());
             self.workspace.map_mut().viewport.pan.x += delta.x;
             self.workspace.map_mut().viewport.pan.y += delta.y;
@@ -1209,7 +1290,7 @@ impl NativeApp {
                 self.galleys.insert(id.clone(), galley);
             }
             match layout::layout(&self.workspace.map().editor.document, &sizes) {
-                Ok(placed) => {
+                Ok(mut placed) => {
                     self.branch_colors.clear();
                     for child in &self.workspace.map().editor.document.nodes
                         [&self.workspace.map().editor.document.root]
@@ -1224,6 +1305,7 @@ impl NativeApp {
                                 .insert(child.clone(), self.branch_colors[parent]);
                         }
                     }
+                    self.filter_focused_layout(&mut placed);
                     self.placed = placed;
                 }
                 Err(error) => self.error = Some(error.to_string()),
@@ -1314,7 +1396,10 @@ impl NativeApp {
             .editing
             .as_ref()
             .and_then(|buffer| {
-                if inline_composing || !ui.is_enabled() {
+                if inline_composing
+                    || !ui.is_enabled()
+                    || !self.placed.nodes.contains_key(&buffer.id)
+                {
                     return None;
                 }
                 let key = ui.input(|input| {
@@ -1351,7 +1436,18 @@ impl NativeApp {
             if !rect.intersects(available) {
                 continue;
             }
-            let selected = self.workspace.map().editor.is_selected(&id);
+            let selected = if let Some(CanvasDrag::Selection {
+                origin,
+                current,
+                additive,
+                ..
+            }) = &self.drag
+            {
+                rect.intersects(egui::Rect::from_two_pos(*origin, *current))
+                    || (*additive && self.workspace.map().editor.is_selected(&id))
+            } else {
+                self.workspace.map().editor.is_selected(&id)
+            };
             let root = id == self.workspace.map().editor.document.root;
             if root {
                 ui.painter().add(egui::epaint::EllipseShape {
@@ -1463,6 +1559,13 @@ impl NativeApp {
                     && self.workspace.pending_activation().is_none()
                     && self.pending_close.is_none()
                     && !self.pending_quit
+                    && !egui::Popup::is_any_open(ui.ctx())
+                    && !ui.input(|input| {
+                        input.pointer.button_down(egui::PointerButton::Secondary)
+                            || input
+                                .pointer
+                                .button_released(egui::PointerButton::Secondary)
+                    })
                 {
                     edit_key = Some((EditorKey::Enter, response.id));
                 }
@@ -1563,7 +1666,7 @@ impl NativeApp {
             let result = self.edit(if toggle {
                 EditorEdit::ToggleSelection(id)
             } else if preserve {
-                EditorEdit::ActivateSelection(id)
+                EditorEdit::ContextSelection(id)
             } else {
                 EditorEdit::Select(id)
             });
@@ -1643,6 +1746,7 @@ impl NativeApp {
             }
         }
         self.update_drag(ui, available, center);
+        self.paint_box_selection(ui, available);
         canvas_response.context_menu(|ui| {
             context_command = self
                 .context_menu(ui, &self.workspace.map().editor.selected, false)
@@ -1666,16 +1770,27 @@ impl NativeApp {
 
     fn update_drag(&mut self, ui: &mut egui::Ui, available: egui::Rect, center: Point) {
         if !ui.is_enabled()
-            || self
-                .drag
-                .as_ref()
-                .is_some_and(|drag| matches!(drag, CanvasDrag::Branch(branch) if branch.revision != self.workspace.map().editor.revision))
+            || self.drag.as_ref().is_some_and(|drag| match drag {
+                CanvasDrag::Branch(branch) => {
+                    branch.revision != self.workspace.map().editor.revision
+                }
+                CanvasDrag::Selection { revision, .. } => {
+                    *revision != self.workspace.map().editor.revision
+                }
+                CanvasDrag::Pan { .. } => false,
+            })
             || ui.input(|input| input.viewport().focused == Some(false))
         {
-            if self.drag.take().is_some() {
+            if self.drag.is_some() {
+                self.cancel_canvas_drag();
+                ui.ctx().stop_dragging();
                 self.status =
                     "Move canceled because the map, window focus or active dialog changed.".into();
             }
+            return;
+        }
+        if matches!(self.drag, Some(CanvasDrag::Selection { .. })) {
+            self.update_box_selection(ui, available, center);
             return;
         }
         if let Some(CanvasDrag::Pan {
@@ -1712,6 +1827,11 @@ impl NativeApp {
             &self.placed,
             world,
             24.0 / self.workspace.map().viewport.zoom,
+            self.workspace
+                .map()
+                .branch_focus
+                .as_ref()
+                .map(|focus| focus.root.as_str()),
         );
         if ui.input(|input| input.pointer.button_released(egui::PointerButton::Primary)) {
             let Some(CanvasDrag::Branch(drag)) = self.drag.take() else {

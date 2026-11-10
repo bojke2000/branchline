@@ -1,5 +1,6 @@
 use crate::{
     app::Editor,
+    document::NodeId,
     file_identity::FileIdentityState,
     layout::{Point, Rect, Size},
 };
@@ -89,15 +90,27 @@ pub struct MapSession {
     id: SessionId,
     pub editor: Editor,
     pub viewport: Viewport,
+    pub branch_focus: Option<BranchFocus>,
     pub search: SearchState,
     pub notes_open: bool,
     pub file_identity: FileIdentityState,
     pub(crate) pristine_blank: bool,
 }
 
+pub struct BranchFocus {
+    pub root: NodeId,
+    pub full_map_viewport: Viewport,
+}
+
 impl MapSession {
     pub fn estimated_bytes(&self) -> usize {
-        self.editor.estimated_bytes() + std::mem::size_of::<Self>() + 4096
+        self.editor.estimated_bytes()
+            + std::mem::size_of::<Self>()
+            + 4096
+            + self
+                .branch_focus
+                .as_ref()
+                .map_or(0, |focus| focus.root.len())
     }
 
     pub fn new_blank(id: SessionId) -> Self {
@@ -105,6 +118,7 @@ impl MapSession {
             id,
             editor: Editor::new(),
             viewport: Viewport::default(),
+            branch_focus: None,
             search: SearchState::default(),
             notes_open: false,
             file_identity: FileIdentityState::Unsaved,
@@ -114,6 +128,12 @@ impl MapSession {
 
     pub fn id(&self) -> SessionId {
         self.id
+    }
+
+    pub fn full_map_viewport(&self) -> Viewport {
+        self.branch_focus
+            .as_ref()
+            .map_or(self.viewport, |focus| focus.full_map_viewport)
     }
 
     pub fn is_pristine_blank(&self) -> bool {

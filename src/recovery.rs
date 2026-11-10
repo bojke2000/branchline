@@ -319,14 +319,15 @@ struct Observation {
 
 impl Observation {
     fn of(map: &MapSession) -> Self {
+        let viewport = map.full_map_viewport();
         Self {
             revision: Revision::of(map),
             path: map.editor.path.clone(),
             selected: map.editor.selected.clone(),
             view: [
-                map.viewport.pan.x.to_bits(),
-                map.viewport.pan.y.to_bits(),
-                map.viewport.zoom.to_bits(),
+                viewport.pan.x.to_bits(),
+                viewport.pan.y.to_bits(),
+                viewport.zoom.to_bits(),
             ],
         }
     }
@@ -604,8 +605,8 @@ impl RecoveryCoordinator {
                     failure: None,
                     view: SavedView {
                         selected: Some(map.editor.selected.clone()),
-                        pan: [map.viewport.pan.x, map.viewport.pan.y],
-                        zoom: map.viewport.zoom,
+                        pan: [map.full_map_viewport().pan.x, map.full_map_viewport().pan.y],
+                        zoom: map.full_map_viewport().zoom,
                     },
                 },
                 RecoverySession::Failed {

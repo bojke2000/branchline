@@ -69,8 +69,16 @@ impl DragSession {
         }
     }
 
-    pub fn update(&mut self, doc: &Document, layout: &Layout, pointer: Option<Point>, snap: f32) {
-        let candidate = pointer.and_then(|pointer| self.destination(doc, layout, pointer, snap));
+    pub fn update(
+        &mut self,
+        doc: &Document,
+        layout: &Layout,
+        pointer: Option<Point>,
+        snap: f32,
+        focused_root: Option<&str>,
+    ) {
+        let candidate =
+            pointer.and_then(|pointer| self.destination(doc, layout, pointer, snap, focused_root));
         if self
             .preview
             .as_ref()
@@ -102,6 +110,7 @@ impl DragSession {
         layout: &Layout,
         pointer: Point,
         snap: f32,
+        focused_root: Option<&str>,
     ) -> Option<(NodeId, MovePlacement)> {
         let distance = |rect: &Rect| {
             let x = (pointer.x - pointer.x.clamp(rect.min.x, rect.max.x)).abs();
@@ -114,7 +123,7 @@ impl DragSession {
             .filter(|(_, rect)| distance(rect) <= snap * snap)
             .min_by(|(_, a), (_, b)| distance(a).total_cmp(&distance(b)))
         {
-            let placement = if self.grouped {
+            let placement = if self.grouped || focused_root == Some(id.as_str()) {
                 MovePlacement::Child(id.clone())
             } else if id == &doc.root {
                 MovePlacement::RootSide(if pointer.x < rect.center().x {
@@ -135,7 +144,7 @@ impl DragSession {
             return Some((id.clone(), placement));
         }
         if self.top_level && !self.grouped {
-            let root = layout.nodes[&doc.root];
+            let root = layout.nodes.get(&doc.root)?;
             let side = if pointer.x < root.center().x {
                 Side::Left
             } else {

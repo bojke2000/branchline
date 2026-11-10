@@ -83,6 +83,7 @@ pub enum SelectionCoverage {
 
 pub enum EditorEdit {
     SelectAll,
+    SetSelection(Vec<NodeId>),
     PasteOutline {
         parent: Option<NodeId>,
         forest: crate::outline::OutlineForest,
@@ -93,6 +94,7 @@ pub enum EditorEdit {
     Select(NodeId),
     ToggleSelection(NodeId),
     ActivateSelection(NodeId),
+    ContextSelection(NodeId),
     BeginReplacement,
     BeginDetails(NodeId),
     FlushDetails,
@@ -303,6 +305,22 @@ impl Editor {
         };
         match edit {
             EditorEdit::SelectAll => candidate.select_all(),
+            EditorEdit::SetSelection(ids) => {
+                let first = ids
+                    .first()
+                    .ok_or_else(|| EditorError::State("Select at least one idea.".into()))?;
+                let visible = candidate.document.visible_nodes();
+                if ids.iter().any(|id| !visible.contains(id)) {
+                    return Err(EditorError::State(
+                        "Selection contains an unknown or hidden idea.".into(),
+                    ));
+                }
+                candidate.selection = ids.iter().cloned().collect();
+                candidate.coverage = SelectionCoverage::VisibleNodes;
+                if !candidate.selection.contains(&candidate.selected) {
+                    candidate.selected = first.clone();
+                }
+            }
             EditorEdit::PasteOutline { parent, forest } => {
                 forest.validate()?;
                 let command = match parent {
@@ -369,6 +387,19 @@ impl Editor {
             EditorEdit::ActivateSelection(id) => {
                 candidate.flush_details()?;
                 candidate.activate_selection(id)?;
+            }
+            EditorEdit::ContextSelection(id) => {
+                let id = candidate
+                    .document
+                    .visible_ancestor(id)
+                    .ok_or_else(|| EditorError::State("Unknown context-menu selection".into()))?;
+                if candidate.coverage == SelectionCoverage::WholeMap
+                    || !candidate.selection.contains(&id)
+                {
+                    candidate.replace_selection(id);
+                } else {
+                    candidate.selected = id;
+                }
             }
             EditorEdit::BeginReplacement => {
                 candidate.flush_details()?;

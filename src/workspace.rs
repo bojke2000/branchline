@@ -2,7 +2,7 @@ use crate::{
     app::{EditorEdit, PreparedEdit},
     file_identity::{FileIdentity, FileIdentityState, OpenedFile},
     interchange::{ImportReport, read_native},
-    session::{MapSession, SessionId, SessionState},
+    session::{BranchFocus, MapSession, SessionId, SessionState},
     storage::atomic_write_opened,
 };
 use std::{collections::BTreeMap, path::Path};
@@ -268,6 +268,34 @@ impl Workspace {
             .map_err(|error| WorkspaceError(error.to_string()))?;
         let next_stamp = self.admit_edit(id, &prepared)?;
         self.commit_edit(id, prepared, next_stamp);
+        Ok(())
+    }
+
+    pub fn focus_branch(&mut self, root: crate::document::NodeId) -> Result<(), WorkspaceError> {
+        self.require_idle()?;
+        let session = self.session(self.active_id())?;
+        let full_map_viewport = session.full_map_viewport();
+        let prepared = session
+            .editor
+            .prepare(&EditorEdit::SetSelection(vec![root.clone()]))
+            .map_err(|error| WorkspaceError(error.to_string()))?;
+        let next_stamp = self.admit_edit(self.active_id(), &prepared)?;
+        let growth = self.estimated_bytes()
+            - session.editor.estimated_bytes()
+            - session
+                .branch_focus
+                .as_ref()
+                .map_or(0, |focus| focus.root.len())
+            + prepared.estimated_bytes()
+            + root.len();
+        if growth > self.storage_limit {
+            return Err(WorkspaceError("Workspace storage capacity exceeded; the previous view, selection and drafts were retained.".into()));
+        }
+        self.commit_edit(self.active_id(), prepared, next_stamp);
+        self.map_mut().branch_focus = Some(BranchFocus {
+            root,
+            full_map_viewport,
+        });
         Ok(())
     }
 
@@ -658,6 +686,47 @@ mod tests {
         app::{EditorAction, EditorEdit},
         document::Command,
     };
+
+    #[test]
+    fn branch_focus_storage_is_admitted_atomically_without_committing_drafts() {
+        let mut workspace = Workspace::new();
+        let session = workspace.active_id();
+        let root = workspace.map().editor.selected.clone();
+        workspace
+            .apply(
+                session,
+                EditorEdit::Command(Command::AddChild {
+                    parent: root.clone(),
+                    text: "Focus".into(),
+                }),
+            )
+            .unwrap();
+        let branch = workspace.map().editor.selected.clone();
+        workspace
+            .apply(session, EditorEdit::Select(root.clone()))
+            .unwrap();
+        workspace.storage_limit = workspace.estimated_bytes();
+        assert!(workspace.focus_branch(branch.clone()).is_err());
+        assert!(workspace.map().branch_focus.is_none());
+        assert_eq!(workspace.map().editor.selected, root);
+        workspace.storage_limit += 4096;
+        workspace.focus_branch(branch.clone()).unwrap();
+        workspace
+            .map_mut()
+            .editor
+            .dispatch(EditorAction::Edit)
+            .unwrap();
+        workspace.map_mut().editor.editing.as_mut().unwrap().text = "Retained label draft".into();
+        let before = workspace.map().editor.document.clone();
+        let generation = workspace.map().editor.history.generation;
+        workspace.focus_branch(branch).unwrap();
+        assert_eq!(workspace.map().editor.document, before);
+        assert_eq!(workspace.map().editor.history.generation, generation);
+        assert_eq!(
+            workspace.map().editor.editing.as_ref().unwrap().text,
+            "Retained label draft"
+        );
+    }
 
     #[test]
     fn pasted_new_maps_share_history_stamps_and_the_global_budget() {
