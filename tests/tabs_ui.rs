@@ -638,7 +638,10 @@ fn final_native_save_failure_aborts_quit_without_committing_the_draft() {
         &ctx,
         vec![Event::Text("Retain after save failure".into())],
     );
-    std::fs::rename(&parent, temp.path().join("retained-maps")).unwrap();
+    let retained = temp.path().join("retained-maps");
+    std::fs::create_dir(&retained).unwrap();
+    std::fs::rename(&path, retained.join("saved.branchline")).unwrap();
+    std::fs::remove_dir(&parent).unwrap();
     std::fs::write(&parent, b"foreign path obstacle").unwrap();
     key(&mut app, &ctx, Key::Q, command());
     click_label(&mut app, &ctx, "Save");
