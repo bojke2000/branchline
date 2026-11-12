@@ -132,6 +132,79 @@ fn fixture() -> (tempfile::TempDir, NativeApp, NodeId, NodeId) {
 }
 
 #[test]
+fn notes_font_buttons_resize_text_without_moving_controls_or_editing_notes() {
+    let (_temp, mut app, _root, _target) = fixture();
+    let ctx = egui::Context::default();
+    frame(&mut app, &ctx, vec![]);
+    open_notes(&mut app, &ctx, "Popup target");
+    let before = app.workspace.map().editor.document.clone();
+    let generation = app.workspace.map().editor.history.generation;
+    let output = frame(&mut app, &ctx, vec![]);
+    let font_size = |output: &egui::FullOutput| {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Existing notes" => {
+                    Some(text.galley.job.sections[0].format.font_id.size)
+                }
+                _ => None,
+            })
+            .expect("visible notes input")
+    };
+    let initial_size = font_size(&output);
+    let apply = position(&output, "Apply");
+    click(
+        &mut app,
+        &ctx,
+        position(&output, "+"),
+        egui::PointerButton::Primary,
+    );
+    let output = frame(&mut app, &ctx, vec![]);
+    assert_eq!(font_size(&output), initial_size + 1.0);
+    assert!(position(&output, "Apply").distance(apply) <= 1.0);
+    click(
+        &mut app,
+        &ctx,
+        position(&output, "-"),
+        egui::PointerButton::Primary,
+    );
+    let output = frame(&mut app, &ctx, vec![]);
+    assert_eq!(font_size(&output), initial_size);
+    assert!(position(&output, "Apply").distance(apply) <= 1.0);
+    assert_eq!(app.workspace.map().editor.document, before);
+    assert_eq!(app.workspace.map().editor.history.generation, generation);
+    frame(&mut app, &ctx, vec![egui::Event::Text("+-".into())]);
+    position(&frame(&mut app, &ctx, vec![]), "Existing notes+-");
+}
+
+#[test]
+fn f4_focuses_selected_branch_and_f5_restores_the_map_without_editing() {
+    let (_temp, mut app, _root, target) = fixture();
+    let ctx = egui::Context::default();
+    frame(&mut app, &ctx, vec![]);
+    let before = app.workspace.map().editor.document.clone();
+    let generation = app.workspace.map().editor.history.generation;
+    let viewport = app.workspace.map().viewport;
+    key(&mut app, &ctx, Key::F4, egui::Modifiers::NONE);
+    assert_eq!(
+        app.workspace.map().branch_focus.as_ref().unwrap().root,
+        target
+    );
+    key(&mut app, &ctx, Key::F5, egui::Modifiers::NONE);
+    assert!(app.workspace.map().branch_focus.is_none());
+    assert_eq!(app.workspace.map().viewport.pan, viewport.pan);
+    assert_eq!(app.workspace.map().viewport.zoom, viewport.zoom);
+    assert_eq!(app.workspace.map().editor.document, before);
+    assert_eq!(app.workspace.map().editor.history.generation, generation);
+    app.action(EditorAction::Edit);
+    frame(&mut app, &ctx, vec![]);
+    key(&mut app, &ctx, Key::F4, egui::Modifiers::NONE);
+    assert!(app.workspace.map().branch_focus.is_none());
+    assert!(app.workspace.map().editor.editing.is_some());
+}
+
+#[test]
 fn f3_opens_selected_topic_notes_without_intercepting_text_editing() {
     let (_temp, mut app, _root, target) = fixture();
     let ctx = egui::Context::default();

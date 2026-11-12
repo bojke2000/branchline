@@ -831,6 +831,7 @@ impl NativeApp {
                         ),
                         ("F2 or double-click", "Edit selected idea"),
                         ("F3", "Open notes for the selected idea"),
+                        ("F4 / F5", "Focus selected branch / return to full map"),
                         ("Start typing", "Replace the active idea; Enter commits"),
                         ("Escape", "Cancel inline edit or close search/commands"),
                         ("Arrows", "Navigate the map (text fields keep cursor keys)"),

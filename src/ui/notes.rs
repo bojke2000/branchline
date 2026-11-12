@@ -7,6 +7,7 @@ pub(super) struct NotesPopup {
     text: String,
     focus: bool,
     composing: bool,
+    font_adjustment: f32,
     error: Option<String>,
 }
 
@@ -29,6 +30,7 @@ impl NativeApp {
             text,
             focus: true,
             composing: false,
+            font_adjustment: 0.0,
             error: None,
         }));
     }
@@ -73,6 +75,9 @@ impl NativeApp {
         ui.heading("Notes");
         ui.label("Write Markdown below. Use Bold or Bullet list to format your notes.");
         let mut format = None;
+        let mut font = egui::FontSelection::Default.resolve(ui.style());
+        font.size = (font.size + 1.0 + popup.font_adjustment).clamp(10.0, 32.0);
+        let mut font_changed = false;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!composition_frame, egui::Button::new("Bold"))
@@ -86,6 +91,31 @@ impl NativeApp {
             {
                 format = Some(Format::Bullets);
             }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    !composition_frame && font.size > 10.0,
+                    egui::Button::new("-"),
+                )
+                .on_hover_text("Decrease notes font size")
+                .clicked()
+            {
+                popup.font_adjustment -= 1.0;
+                font.size = (font.size - 1.0).max(10.0);
+                font_changed = true;
+            }
+            if ui
+                .add_enabled(
+                    !composition_frame && font.size < 32.0,
+                    egui::Button::new("+"),
+                )
+                .on_hover_text("Increase notes font size")
+                .clicked()
+            {
+                popup.font_adjustment += 1.0;
+                font.size = (font.size + 1.0).min(32.0);
+                font_changed = true;
+            }
         });
         let previous = popup.text.clone();
         let mut selection = None;
@@ -98,8 +128,6 @@ impl NativeApp {
             selection = Some(range);
         }
         let height = (viewport.height() * 0.336).clamp(126.0, 308.0);
-        let mut font = egui::FontSelection::Default.resolve(ui.style());
-        font.size += 1.0;
         let output = egui::ScrollArea::vertical()
             .id_salt("notes-source-scroll")
             .max_height(height)
@@ -122,7 +150,7 @@ impl NativeApp {
             self.error = Some(message.into());
             selection = None;
         }
-        if popup.focus || format.is_some() {
+        if popup.focus || format.is_some() || font_changed {
             output.response.request_focus();
             popup.focus = false;
         }

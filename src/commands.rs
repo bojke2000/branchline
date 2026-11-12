@@ -250,8 +250,8 @@ impl AppCommand {
             EditNotes => ("Notes...", "F3", Some(Plain(Key::F3))),
             Fit => ("Fit map", "", None),
             Focus => ("Focus selection", "", None),
-            FocusBranch => ("Focus branch", "", None),
-            ShowFullMap => ("Show full map", "", None),
+            FocusBranch => ("Focus branch", "F4", Some(Plain(Key::F4))),
+            ShowFullMap => ("Show full map", "F5", Some(Plain(Key::F5))),
             PanLeft => (
                 "Pan map left",
                 "Alt+Shift+Left",

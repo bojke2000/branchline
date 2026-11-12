@@ -102,6 +102,7 @@ A follow-up CPU run after eliminating redundant title updates measured
 | Enter | Add sibling; while editing, commit without creating a node |
 | F2 / double-click | Edit the selected idea |
 | F3 | Open Notes popup for the selected idea |
+| F4 / F5 | Focus selected branch / return to full map |
 | Start typing on a selected idea | Replace its label as you type; Enter commits, Escape restores |
 | Escape | Cancel inline editing or close search/commands |
 | Arrows | Navigate branches and siblings |
@@ -194,6 +195,7 @@ moving the canvas or opening the sidebar. Select text and click **Bold**, or use
 **Bullet list** on the current line or selected lines. This is a simple Markdown
 source editor, not a WYSIWYG editor. A compact, stable-height popup gives the
 available space to the input box, with scrolling for longer notes.
+Use **-** / **+** in the popup to decrease/increase the input font by 1px.
 
 **Apply** or **Cmd/Ctrl+Enter** saves the notes as one undoable edit.
 **Cancel** or **Escape** discards only the popup's changes. Existing unfinished
