@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=BMM
+Comment=Local-first mind mapper
+Exec=bmm
+Terminal=false
+Categories=Office;
+StartupNotify=true

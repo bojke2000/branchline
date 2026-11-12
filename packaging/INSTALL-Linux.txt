@@ -1,0 +1,14 @@
+BMM for Debian 12+ and Ubuntu 22.04+ (amd64)
+
+Install the downloaded package with apt so runtime dependencies are installed:
+  sudo apt install ./bmm_0.1.0_amd64.deb
+
+Start BMM from your application menu or run:
+  bmm
+
+A graphical desktop session is required. Native packages are install-checked on
+Debian 12, Ubuntu 22.04 and Ubuntu 24.04; this does not certify every desktop or GPU.
+This is not a signed APT repository. Verify the release SHA256SUMS.txt.
+
+Close any existing BMM instance before launching another. Maps and recovery data
+remain local in the existing Branchline data directory.

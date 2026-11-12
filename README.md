@@ -13,6 +13,13 @@ measured usability improvement. No Freeplane code or artwork is included.
 
 ## Run
 
+Download macOS, Windows and Debian/Ubuntu packages from
+[GitHub Releases](https://github.com/bojke2000/bmm/releases).
+macOS builds are not Developer ID signed/notarized, and Windows builds are
+not Authenticode signed; see each release's installation notes.
+
+To build from source:
+
 Install Rust with Cargo, then:
 
 ```sh
@@ -191,11 +198,11 @@ map's view.
 ### Quick notes
 
 Press **F3** on a selected topic, or right-click and choose **Notes...**, to edit its notes in a popup without
-moving the canvas or opening the sidebar. Select text and click **Bold**, or use
-**Bullet list** on the current line or selected lines. This is a simple Markdown
-source editor, not a WYSIWYG editor. A compact, stable-height popup gives the
-available space to the input box, with scrolling for longer notes.
-Use **-** / **+** in the popup to decrease/increase the input font by 1px.
+moving the canvas or opening the sidebar. A compact, stable-height popup gives
+the available space to the plain-text input box, with scrolling for longer notes.
+Use **- fn +** in the popup to decrease/increase the input font by 1px.
+Font size is shared across topics and saved locally across app restarts, including
+when the notes edit is canceled. It does not change document content or history.
 
 **Apply** or **Cmd/Ctrl+Enter** saves the notes as one undoable edit.
 **Cancel** or **Escape** discards only the popup's changes. Existing unfinished

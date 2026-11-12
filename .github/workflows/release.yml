@@ -1,0 +1,243 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to release
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: version
+        name: Validate release version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$TAG" = "v$version"
+          printf 'version=%s\ntag=%s\n' "$version" "$TAG" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      VERSION: ${{ needs.version.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+      - name: Select stable Rust
+        run: rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+      - name: Test release behavior
+        run: cargo test --release --locked --lib --test editor --test workspace --test tabs_ui --test clipboard_ui
+      - name: Build and verify app bundle
+        run: |
+          set -euo pipefail
+          sh scripts/bundle.sh
+          test "$(lipo -archs target/bundle/BMM.app/Contents/MacOS/BMM)" = "$ARCH"
+          test "$(plutil -extract CFBundleShortVersionString raw target/bundle/BMM.app/Contents/Info.plist)" = "$VERSION"
+          codesign --force --deep --sign - target/bundle/BMM.app
+          codesign --verify --deep --strict target/bundle/BMM.app
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent target/bundle/BMM.app "dist/BMM-${VERSION}-macos-${ARCH}.zip"
+          unzip -t "dist/BMM-${VERSION}-macos-${ARCH}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+      - name: Select stable Rust
+        run: rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-x86_64-crt-static-${{ hashFiles('Cargo.lock') }}
+      - name: Test release behavior
+        run: cargo test --release --locked --lib --test editor --test workspace --test tabs_ui --test clipboard_ui --test document
+      - name: Build executable
+        run: cargo build --release --locked
+      - name: Package and verify portable application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binary = [System.IO.File]::ReadAllBytes('target/release/branchline.exe')
+          $pe = [BitConverter]::ToInt32($binary, 0x3c)
+          if ([BitConverter]::ToUInt16($binary, $pe + 4) -ne 0x8664) {
+            throw 'Expected an x64 executable'
+          }
+          if ([BitConverter]::ToUInt16($binary, $pe + 24 + 68) -ne 2) {
+            throw 'Expected a GUI executable without a console window'
+          }
+          New-Item -ItemType Directory -Force dist, target/windows-package | Out-Null
+          Copy-Item target/release/branchline.exe target/windows-package/BMM.exe
+          Copy-Item packaging/INSTALL-Windows.txt target/windows-package/INSTALL.txt
+          Compress-Archive -Path target/windows-package/* -DestinationPath "dist/BMM-${env:VERSION}-windows-x86_64.zip"
+          Expand-Archive -Path "dist/BMM-${env:VERSION}-windows-x86_64.zip" -DestinationPath target/windows-verify
+          if ((Get-FileHash target/windows-package/BMM.exe).Hash -ne (Get-FileHash target/windows-verify/BMM.exe).Hash) {
+            throw 'Packaged executable differs from the built binary'
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  deb:
+    needs: version
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+      - name: Select stable Rust
+        run: rustup default stable
+      - name: Install packaging and desktop build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libxkbcommon-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            dpkg-dev desktop-file-utils
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-ubuntu22-x86_64-${{ hashFiles('Cargo.lock') }}
+      - name: Test release behavior
+        run: cargo test --release --locked --lib --test editor --test workspace --test tabs_ui --test clipboard_ui --test document
+      - name: Build and package
+        run: |
+          cargo build --release --locked
+          sh scripts/package-deb.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: dist/*.deb
+          if-no-files-found: error
+
+  install-deb:
+    needs: [version, deb]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "ubuntu:22.04", "ubuntu:24.04"]
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-amd64
+          path: dist
+      - name: Install and verify package on a clean distribution
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y --no-install-recommends desktop-file-utils "./dist/bmm_${VERSION}_amd64.deb"
+          test "$(dpkg-query -W -f='${Version}' bmm)" = "$VERSION"
+          test -x /usr/bin/bmm
+          desktop-file-validate /usr/share/applications/bmm.desktop
+          ldd /usr/bin/bmm > /tmp/bmm-dependencies.txt
+          cat /tmp/bmm-dependencies.txt
+          if grep -q 'not found' /tmp/bmm-dependencies.txt; then exit 1; fi
+
+  publish:
+    needs: [version, macos, windows, install-deb]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify complete artifact set and generate checksums
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 4
+          for name in "BMM-${VERSION}-macos-arm64.zip" "BMM-${VERSION}-macos-x86_64.zip" \
+              "BMM-${VERSION}-windows-x86_64.zip" "bmm_${VERSION}_amd64.deb"; do
+            test -s "$name"
+          done
+          sha256sum ./*.zip ./*.deb > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+      - name: Upload, re-download and publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --verify-tag --draft --title "BMM $TAG" \
+            --notes-file packaging/RELEASE-NOTES.md dist/*
+          gh release download "$TAG" --dir verified
+          (cd verified && sha256sum --check SHA256SUMS.txt)
+          gh release edit "$TAG" --draft=false --latest

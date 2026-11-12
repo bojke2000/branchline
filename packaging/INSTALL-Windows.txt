@@ -1,0 +1,14 @@
+BMM for Windows 10/11 x64
+
+Extract the ZIP to a folder, then double-click BMM.exe.
+No installer or administrator privileges are required.
+
+This early release is not code-signed. Windows SmartScreen may show a warning.
+Only run the file if you trust its source; verify SHA256SUMS.txt from the release.
+
+The default renderer is CPU-based. For troubleshooting, launch from a terminal:
+  BMM.exe --renderer wgpu
+
+Maps and recovery data remain local. Close any running BMM instance before
+launching another. The executable retains the existing Branchline data directory
+so upgrading does not abandon your saved workspace or Notes font preference.

@@ -362,6 +362,10 @@ impl RecoveryCoordinator {
         self.store.directory().join("workspace.json")
     }
 
+    pub(crate) fn preferences_path(&self) -> PathBuf {
+        self.store.directory().join("preferences.json")
+    }
+
     fn read_manifest(&mut self) -> Result<WorkspaceManifest, StorageError> {
         let path = self.path();
         match fs::symlink_metadata(&path) {

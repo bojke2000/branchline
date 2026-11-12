@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use branchline::{desktop, recovery::RecoveryCoordinator, ui::NativeApp};
 use directories::ProjectDirs;
 use eframe::egui;

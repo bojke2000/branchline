@@ -153,6 +153,11 @@ fn notes_font_buttons_resize_text_without_moving_controls_or_editing_notes() {
             .expect("visible notes input")
     };
     let initial_size = font_size(&output);
+    assert!(position(&output, "-").x < position(&output, "fn").x);
+    assert!(position(&output, "fn").x < position(&output, "+").x);
+    assert!(!output.shapes.iter().any(|shape| matches!(
+        &shape.shape, egui::Shape::Text(text) if ["Bold", "Bullet list"].contains(&text.galley.job.text.as_str())
+    )));
     let apply = position(&output, "Apply");
     click(
         &mut app,
@@ -176,6 +181,103 @@ fn notes_font_buttons_resize_text_without_moving_controls_or_editing_notes() {
     assert_eq!(app.workspace.map().editor.history.generation, generation);
     frame(&mut app, &ctx, vec![egui::Event::Text("+-".into())]);
     position(&frame(&mut app, &ctx, vec![]), "Existing notes+-");
+}
+
+#[test]
+fn notes_font_size_is_shared_between_topics_and_survives_restart_after_cancel() {
+    let (temp, mut app, root, _target) = fixture();
+    let ctx = egui::Context::default();
+    frame(&mut app, &ctx, vec![]);
+    open_notes(&mut app, &ctx, "Popup target");
+    let input_size = |output: &egui::FullOutput, text: &str| {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(shape) if shape.galley.job.text == text => {
+                    Some(shape.galley.job.sections[0].format.font_id.size)
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let output = frame(&mut app, &ctx, vec![]);
+    let initial = input_size(&output, "Existing notes");
+    click(
+        &mut app,
+        &ctx,
+        position(&output, "+"),
+        egui::PointerButton::Primary,
+    );
+    key(&mut app, &ctx, Key::Escape, egui::Modifiers::NONE);
+    frame(&mut app, &ctx, vec![]);
+    app.edit(EditorEdit::Select(root)).unwrap();
+    app.run_command(AppCommand::EditNotes, &ctx);
+    frame(&mut app, &ctx, vec![]);
+    replace_text(&mut app, &ctx, "Other topic");
+    assert_eq!(
+        input_size(&frame(&mut app, &ctx, vec![]), "Other topic"),
+        initial + 1.0
+    );
+    drop(app);
+    let mut restarted =
+        NativeApp::new(RecoveryCoordinator::open(temp.path().join("recovery")).unwrap()).unwrap();
+    let ctx = egui::Context::default();
+    frame(&mut restarted, &ctx, vec![]);
+    restarted.run_command(AppCommand::EditNotes, &ctx);
+    frame(&mut restarted, &ctx, vec![]);
+    frame(&mut restarted, &ctx, vec![]);
+    replace_text(&mut restarted, &ctx, "After restart");
+    assert_eq!(
+        input_size(&frame(&mut restarted, &ctx, vec![]), "After restart"),
+        initial + 1.0
+    );
+}
+
+#[test]
+fn notes_font_preferences_report_invalid_data_and_failed_writes_without_losing_notes() {
+    let (temp, mut app, _root, _target) = fixture();
+    let preferences = temp.path().join("recovery/preferences.json");
+    let ctx = egui::Context::default();
+    frame(&mut app, &ctx, vec![]);
+    open_notes(&mut app, &ctx, "Popup target");
+    replace_text(&mut app, &ctx, "Retained draft");
+    std::fs::create_dir(&preferences).unwrap();
+    let output = frame(&mut app, &ctx, vec![]);
+    click(
+        &mut app,
+        &ctx,
+        position(&output, "+"),
+        egui::PointerButton::Primary,
+    );
+    assert!(
+        app.error
+            .as_ref()
+            .unwrap()
+            .contains("Could not save Notes font size")
+    );
+    assert!(app.dialog.is_some());
+    assert!(app.notes_font_size.is_none());
+    position(&frame(&mut app, &ctx, vec![]), "Retained draft");
+    drop(app);
+    std::fs::remove_dir(&preferences).unwrap();
+    for data in [
+        r#"{"notes_font_size":999}"#,
+        r#"{"notes_font_size":0}"#,
+        "{invalid",
+    ] {
+        std::fs::write(&preferences, data).unwrap();
+        let app = NativeApp::new(RecoveryCoordinator::open(temp.path().join("recovery")).unwrap())
+            .unwrap();
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("Could not restore Notes font size")
+        );
+        assert!(app.notes_font_size.is_none());
+        assert_eq!(std::fs::read_to_string(&preferences).unwrap(), data);
+    }
 }
 
 #[test]
@@ -236,7 +338,7 @@ fn notes_popup_stays_in_place_when_typing_and_scrolling_long_notes() {
             frame_at_size(&mut app, &ctx, vec![], size);
         }
         let before = frame_at_size(&mut app, &ctx, vec![], size);
-        let controls = ["Bold", "Apply", "Cancel"];
+        let controls = ["fn", "Apply", "Cancel"];
         let session = app.workspace.active_id();
         let target = app.workspace.map().editor.selected.clone();
         let input = ctx
@@ -409,53 +511,13 @@ fn notes_popup_cancel_preserves_an_existing_notes_draft_and_escape_only_closes_p
 }
 
 #[test]
-fn notes_popup_markdown_buttons_and_apply_are_one_undo_step() {
+fn notes_popup_apply_is_one_undo_step() {
     let (_temp, mut app, _root, target) = fixture();
     let before = app.workspace.map().editor.document.clone();
     let generation = app.workspace.map().editor.history.generation;
     let ctx = egui::Context::default();
     frame(&mut app, &ctx, vec![]);
     open_notes(&mut app, &ctx, "Popup target");
-    replace_text(&mut app, &ctx, "研究");
-    key(
-        &mut app,
-        &ctx,
-        Key::A,
-        egui::Modifiers {
-            command: true,
-            ctrl: true,
-            ..Default::default()
-        },
-    );
-    let output = frame(&mut app, &ctx, vec![]);
-    click(
-        &mut app,
-        &ctx,
-        position(&output, "Bold"),
-        egui::PointerButton::Primary,
-    );
-    let output = frame(&mut app, &ctx, vec![]);
-    position(&output, "**研究**");
-    replace_text(&mut app, &ctx, "First\nSecond");
-    key(
-        &mut app,
-        &ctx,
-        Key::A,
-        egui::Modifiers {
-            command: true,
-            ctrl: true,
-            ..Default::default()
-        },
-    );
-    let output = frame(&mut app, &ctx, vec![]);
-    click(
-        &mut app,
-        &ctx,
-        position(&output, "Bullet list"),
-        egui::PointerButton::Primary,
-    );
-    let output = frame(&mut app, &ctx, vec![]);
-    position(&output, "- First\n- Second");
     replace_text(&mut app, &ctx, "**Important**\n\n- First\n- Second");
     let output = frame(&mut app, &ctx, vec![]);
     position(&output, "**Important**\n\n- First\n- Second");
@@ -480,39 +542,6 @@ fn notes_popup_markdown_buttons_and_apply_are_one_undo_step() {
     );
     app.action(EditorAction::Undo);
     assert_eq!(app.workspace.map().editor.document, before);
-}
-
-#[test]
-fn notes_popup_bullets_start_an_empty_note_with_the_caret_after_the_marker() {
-    let (_temp, mut app, _root, target) = fixture();
-    let ctx = egui::Context::default();
-    frame(&mut app, &ctx, vec![]);
-    open_notes(&mut app, &ctx, "Popup target");
-    replace_text(&mut app, &ctx, "");
-    let output = frame(&mut app, &ctx, vec![]);
-    click(
-        &mut app,
-        &ctx,
-        position(&output, "Bullet list"),
-        egui::PointerButton::Primary,
-    );
-    frame(&mut app, &ctx, vec![egui::Event::Text("First".into())]);
-    let output = frame(&mut app, &ctx, vec![]);
-    position(&output, "- First");
-    key(
-        &mut app,
-        &ctx,
-        Key::Enter,
-        egui::Modifiers {
-            command: true,
-            ctrl: true,
-            ..Default::default()
-        },
-    );
-    assert_eq!(
-        app.workspace.map().editor.document.nodes[&target].notes,
-        "- First"
-    );
 }
 
 #[test]

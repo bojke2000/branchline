@@ -1,5 +1,29 @@
 use super::*;
-use egui::text::{CCursor, CCursorRange};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Preferences {
+    notes_font_size: f32,
+}
+
+pub(super) fn load_font_size(path: &std::path::Path) -> Result<Option<f32>, StorageError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(StorageError(format!("{}: {error}", path.display()))),
+        Ok(_) => {}
+    }
+    let preferences: Preferences = serde_json::from_slice(&read_bounded(path)?)
+        .map_err(|error| StorageError(format!("{}: {error}", path.display())))?;
+    if !preferences.notes_font_size.is_finite()
+        || !(10.0..=32.0).contains(&preferences.notes_font_size)
+    {
+        return Err(StorageError(
+            "Saved Notes font size must be between 10 and 32.".into(),
+        ));
+    }
+    Ok(Some(preferences.notes_font_size))
+}
 
 pub(super) struct NotesPopup {
     session: SessionId,
@@ -7,7 +31,6 @@ pub(super) struct NotesPopup {
     text: String,
     focus: bool,
     composing: bool,
-    font_adjustment: f32,
     error: Option<String>,
 }
 
@@ -30,7 +53,6 @@ impl NativeApp {
             text,
             focus: true,
             composing: false,
-            font_adjustment: 0.0,
             error: None,
         }));
     }
@@ -73,25 +95,13 @@ impl NativeApp {
             })
         };
         ui.heading("Notes");
-        ui.label("Write Markdown below. Use Bold or Bullet list to format your notes.");
-        let mut format = None;
+        ui.label("Write your notes below.");
         let mut font = egui::FontSelection::Default.resolve(ui.style());
-        font.size = (font.size + 1.0 + popup.font_adjustment).clamp(10.0, 32.0);
-        let mut font_changed = false;
+        font.size = self
+            .notes_font_size
+            .unwrap_or((font.size + 1.0).clamp(10.0, 32.0));
+        let mut requested_size = None;
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!composition_frame, egui::Button::new("Bold"))
-                .clicked()
-            {
-                format = Some(Format::Bold);
-            }
-            if ui
-                .add_enabled(!composition_frame, egui::Button::new("Bullet list"))
-                .clicked()
-            {
-                format = Some(Format::Bullets);
-            }
-            ui.separator();
             if ui
                 .add_enabled(
                     !composition_frame && font.size > 10.0,
@@ -100,10 +110,9 @@ impl NativeApp {
                 .on_hover_text("Decrease notes font size")
                 .clicked()
             {
-                popup.font_adjustment -= 1.0;
-                font.size = (font.size - 1.0).max(10.0);
-                font_changed = true;
+                requested_size = Some((font.size - 1.0).max(10.0));
             }
+            ui.label("fn");
             if ui
                 .add_enabled(
                     !composition_frame && font.size < 32.0,
@@ -112,21 +121,30 @@ impl NativeApp {
                 .on_hover_text("Increase notes font size")
                 .clicked()
             {
-                popup.font_adjustment += 1.0;
-                font.size = (font.size + 1.0).min(32.0);
-                font_changed = true;
+                requested_size = Some((font.size + 1.0).min(32.0));
             }
         });
-        let previous = popup.text.clone();
-        let mut selection = None;
-        if let Some(format) = format {
-            let range = egui::text_edit::TextEditState::load(&ctx, id)
-                .and_then(|state| state.cursor.char_range())
-                .unwrap_or_else(|| CCursorRange::one(CCursor::new(popup.text.chars().count())));
-            let (text, range) = format_text(&popup.text, range, format);
-            popup.text = text;
-            selection = Some(range);
+        let mut font_changed = false;
+        if let Some(size) = requested_size {
+            let result = crate::storage::serialize_bounded(&Preferences {
+                notes_font_size: size,
+            })
+            .and_then(|bytes| atomic_write(&self.store.preferences_path(), &bytes));
+            match result {
+                Ok(()) => {
+                    self.notes_font_size = Some(size);
+                    font.size = size;
+                    font_changed = true;
+                }
+                Err(error) => {
+                    let message =
+                        format!("Could not save Notes font size; previous size retained: {error}");
+                    popup.error = Some(message.clone());
+                    self.error = Some(message);
+                }
+            }
         }
+        let previous = popup.text.clone();
         let height = (viewport.height() * 0.336).clamp(126.0, 308.0);
         let output = egui::ScrollArea::vertical()
             .id_salt("notes-source-scroll")
@@ -148,16 +166,10 @@ impl NativeApp {
                 "Notes exceed the 1 MiB UTF-8 field limit; the previous input was retained.";
             popup.error = Some(message.into());
             self.error = Some(message.into());
-            selection = None;
         }
-        if popup.focus || format.is_some() || font_changed {
+        if popup.focus || font_changed {
             output.response.request_focus();
             popup.focus = false;
-        }
-        if let Some(range) = selection {
-            let mut state = output.state;
-            state.cursor.set_char_range(Some(range));
-            state.store(&ctx, id);
         }
         if let Some(error) = &popup.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
@@ -199,70 +211,4 @@ impl NativeApp {
         }
         true
     }
-}
-
-#[derive(Clone, Copy)]
-enum Format {
-    Bold,
-    Bullets,
-}
-
-fn byte_index(text: &str, character: usize) -> usize {
-    text.char_indices()
-        .nth(character)
-        .map_or(text.len(), |(byte, _)| byte)
-}
-
-fn format_text(text: &str, range: CCursorRange, format: Format) -> (String, CCursorRange) {
-    let [start, end] = range.sorted_cursors();
-    let collapsed = start.index == end.index;
-    let caret = usize::from(start.index);
-    let mut start = byte_index(text, start.index.into());
-    let mut end = byte_index(text, end.index.into());
-    let replacement = match format {
-        Format::Bold => {
-            let selected = &text[start..end];
-            format!("**{selected}**")
-        }
-        Format::Bullets => {
-            start = text[..start].rfind('\n').map_or(0, |index| index + 1);
-            if end > start && text[..end].ends_with('\n') {
-                end -= 1;
-            } else {
-                end = text[end..]
-                    .find('\n')
-                    .map_or(text.len(), |index| end + index);
-            }
-            text[start..end]
-                .split('\n')
-                .map(|line| {
-                    if collapsed && line.trim().is_empty() {
-                        format!("{line}- ")
-                    } else if line.trim().is_empty() || line.trim_start().starts_with("- ") {
-                        line.to_owned()
-                    } else {
-                        let indent = line.len() - line.trim_start().len();
-                        format!("{}- {}", &line[..indent], &line[indent..])
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-    };
-    let mut result = String::with_capacity(text.len() + replacement.len());
-    result.push_str(&text[..start]);
-    result.push_str(&replacement);
-    result.push_str(&text[end..]);
-    let first = text[..start].chars().count();
-    let last = first + replacement.chars().count();
-    let range = if matches!(format, Format::Bold) {
-        CCursorRange::two(CCursor::new(first + 2), CCursor::new(last - 2))
-    } else if collapsed {
-        CCursorRange::one(CCursor::new(
-            caret + replacement.chars().count() - text[start..end].chars().count(),
-        ))
-    } else {
-        CCursorRange::two(CCursor::new(first), CCursor::new(last))
-    };
-    (result, range)
 }

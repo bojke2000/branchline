@@ -101,6 +101,7 @@ pub struct NativeApp {
     help_open: bool,
     edit_focus: Option<NodeId>,
     notes_focus: Option<(SessionId, NodeId)>,
+    notes_font_size: Option<f32>,
     composing: Option<Id>,
     drag: Option<CanvasDrag>,
     allow_close: bool,
@@ -123,7 +124,17 @@ impl NativeApp {
         clipboard: Box<dyn crate::clipboard::OutlineClipboard>,
     ) -> Result<Self, StorageError> {
         let restore = store.load()?;
-        let notices = restore.warnings.join("\n");
+        let mut notices = restore.warnings.join("\n");
+        let notes_font_size = match notes::load_font_size(&store.preferences_path()) {
+            Ok(size) => size,
+            Err(error) => {
+                if !notices.is_empty() {
+                    notices.push('\n');
+                }
+                notices.push_str(&format!("Could not restore Notes font size: {error}"));
+                None
+            }
+        };
         let workspace = Workspace::from_restore(restore, true)
             .map_err(|cause| StorageError(cause.to_string()))?;
         Ok(Self {
@@ -148,6 +159,7 @@ impl NativeApp {
             help_open: false,
             edit_focus: None,
             notes_focus: None,
+            notes_font_size,
             composing: None,
             drag: None,
             allow_close: false,
