@@ -5,6 +5,206 @@ fn folded_map() -> Editor {
 }
 
 #[test]
+fn applying_notes_preserves_unrelated_drafts_and_updates_the_matching_sidebar_only() {
+    use branchline::{document::Command, workspace::Workspace};
+    let mut workspace = Workspace::new();
+    let session = workspace.active_id();
+    let root = workspace.map().editor.selected.clone();
+    workspace
+        .apply(
+            session,
+            EditorEdit::Command(Command::AddChild {
+                parent: root.clone(),
+                text: "Notes target".into(),
+            }),
+        )
+        .unwrap();
+    let target = workspace.map().editor.selected.clone();
+    workspace
+        .apply(session, EditorEdit::Select(root.clone()))
+        .unwrap();
+    workspace
+        .apply(session, EditorEdit::Action(EditorAction::Edit))
+        .unwrap();
+    workspace
+        .apply(
+            session,
+            EditorEdit::SetDraft {
+                field: DraftField::Inline(root.clone()),
+                text: "Retained label".into(),
+            },
+        )
+        .unwrap();
+    workspace
+        .apply(session, EditorEdit::BeginDetails(root.clone()))
+        .unwrap();
+    workspace
+        .apply(
+            session,
+            EditorEdit::SetDraft {
+                field: DraftField::Notes(root.clone()),
+                text: "Retained root notes".into(),
+            },
+        )
+        .unwrap();
+    let before = workspace.map().editor.document.clone();
+    let generation = workspace.map().editor.history.generation;
+    workspace
+        .apply(
+            session,
+            EditorEdit::ApplyNotes {
+                id: target.clone(),
+                notes: "**Target** notes".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        workspace.map().editor.document.nodes[&root],
+        before.nodes[&root]
+    );
+    assert_eq!(
+        workspace.map().editor.editing.as_ref().unwrap().text,
+        "Retained label"
+    );
+    assert_eq!(
+        workspace.map().editor.details.as_ref().unwrap().notes,
+        "Retained root notes"
+    );
+    assert_eq!(
+        workspace.map().editor.document.nodes[&target].notes,
+        "**Target** notes"
+    );
+    assert_eq!(workspace.map().editor.history.generation, generation + 1);
+    workspace
+        .apply(
+            session,
+            EditorEdit::ApplyNotes {
+                id: root.clone(),
+                notes: "Applied root notes".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        workspace.map().editor.details.as_ref().unwrap().notes,
+        "Applied root notes"
+    );
+    assert_eq!(
+        workspace.map().editor.snapshot_with_drafts().unwrap().nodes[&root].notes,
+        "Applied root notes"
+    );
+    let before = workspace.map().editor.document.clone();
+    let generation = workspace.map().editor.history.generation;
+    assert!(
+        workspace
+            .apply(
+                session,
+                EditorEdit::ApplyNotes {
+                    id: root.clone(),
+                    notes: "é".repeat(branchline::document::MAX_FIELD_BYTES / 2 + 1)
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(workspace.map().editor.document, before);
+    assert_eq!(workspace.map().editor.history.generation, generation);
+    workspace
+        .apply(
+            session,
+            EditorEdit::ApplyNotes {
+                id: root,
+                notes: "Applied root notes".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(workspace.map().editor.history.generation, generation);
+}
+
+#[test]
+fn notes_undo_updates_the_sidebar_without_committing_its_unfinished_link() {
+    use branchline::workspace::Workspace;
+    let mut workspace = Workspace::new();
+    let session = workspace.active_id();
+    let root = workspace.map().editor.selected.clone();
+    workspace
+        .apply(session, EditorEdit::BeginDetails(root.clone()))
+        .unwrap();
+    workspace
+        .apply(
+            session,
+            EditorEdit::SetDraft {
+                field: DraftField::Link(root.clone()),
+                text: "https://unfinished.example".into(),
+            },
+        )
+        .unwrap();
+    workspace
+        .apply(
+            session,
+            EditorEdit::ApplyNotes {
+                id: root.clone(),
+                notes: "**Applied**".into(),
+            },
+        )
+        .unwrap();
+    workspace
+        .apply(session, EditorEdit::Action(EditorAction::Undo))
+        .unwrap();
+    assert_eq!(
+        workspace.map().editor.snapshot_with_drafts().unwrap().nodes[&root].notes,
+        ""
+    );
+    assert_eq!(
+        workspace.map().editor.details.as_ref().unwrap().link,
+        "https://unfinished.example"
+    );
+    workspace
+        .apply(session, EditorEdit::Action(EditorAction::Redo))
+        .unwrap();
+    assert_eq!(
+        workspace.map().editor.snapshot_with_drafts().unwrap().nodes[&root].notes,
+        "**Applied**"
+    );
+    assert_eq!(workspace.map().editor.document.nodes[&root].link, "");
+}
+
+#[test]
+fn undo_does_not_remove_an_unfinished_inline_draft_owner() {
+    use branchline::workspace::Workspace;
+    let mut workspace = Workspace::new();
+    let session = workspace.active_id();
+    workspace
+        .apply(session, EditorEdit::Action(EditorAction::AddChild))
+        .unwrap();
+    workspace.apply(session, EditorEdit::CommitDrafts).unwrap();
+    let child = workspace.map().editor.selected.clone();
+    workspace
+        .apply(session, EditorEdit::Action(EditorAction::Edit))
+        .unwrap();
+    workspace
+        .apply(
+            session,
+            EditorEdit::SetDraft {
+                field: DraftField::Inline(child),
+                text: "Unfinished child label".into(),
+            },
+        )
+        .unwrap();
+    let before = workspace.map().editor.document.clone();
+    let generation = workspace.map().editor.history.generation;
+    assert!(
+        workspace
+            .apply(session, EditorEdit::Action(EditorAction::Undo))
+            .is_err()
+    );
+    assert_eq!(workspace.map().editor.document, before);
+    assert_eq!(workspace.map().editor.history.generation, generation);
+    assert_eq!(
+        workspace.map().editor.editing.as_ref().unwrap().text,
+        "Unfinished child label"
+    );
+}
+
+#[test]
 fn whole_map_selection_includes_folded_root_tree() {
     let mut editor = folded_map();
     editor.select_all();

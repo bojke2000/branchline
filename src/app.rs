@@ -97,6 +97,10 @@ pub enum EditorEdit {
     ContextSelection(NodeId),
     BeginReplacement,
     BeginDetails(NodeId),
+    ApplyNotes {
+        id: NodeId,
+        notes: String,
+    },
     FlushDetails,
     CommitDrafts,
     SetDraft {
@@ -345,13 +349,28 @@ impl Editor {
                 candidate.execute(command)?;
             }
             EditorEdit::Action(action) => {
-                if matches!(action, EditorAction::Undo | EditorAction::Redo) {
-                    let unchanged_details = candidate.details.as_ref().is_some_and(|draft| {
-                        candidate.document.nodes.get(&draft.id).is_some_and(|node| {
-                            node.notes == draft.notes && node.link == draft.link
-                        })
-                    });
-                    if unchanged_details {
+                let changing_history = matches!(action, EditorAction::Undo | EditorAction::Redo);
+                let retained_inline = if changing_history
+                    && candidate.editing.as_ref().is_some_and(|draft| {
+                        candidate
+                            .document
+                            .nodes
+                            .get(&draft.id)
+                            .is_some_and(|node| node.text != draft.text)
+                    }) {
+                    candidate.editing.take()
+                } else {
+                    None
+                };
+                let clean_details = candidate.details.as_ref().and_then(|draft| {
+                    candidate
+                        .document
+                        .nodes
+                        .get(&draft.id)
+                        .map(|node| (node.notes == draft.notes, node.link == draft.link))
+                });
+                if changing_history {
+                    if clean_details == Some((true, true)) {
                         candidate.details = None;
                         candidate.draft_revision = candidate.draft_revision.wrapping_add(1);
                     }
@@ -359,13 +378,36 @@ impl Editor {
                     candidate.flush_details()?;
                 }
                 candidate.dispatch(*action)?;
-                if matches!(action, EditorAction::Undo | EditorAction::Redo)
-                    && candidate
-                        .details
-                        .as_ref()
-                        .is_some_and(|draft| !candidate.document.nodes.contains_key(&draft.id))
-                {
-                    return Err(EditorError::State("Undo/redo would remove an unfinished notes edit's owner. Finish that edit before changing this history step.".into()));
+                if let Some(draft) = retained_inline {
+                    if !candidate.document.nodes.contains_key(&draft.id) {
+                        return Err(EditorError::State(
+                            "Undo/redo would remove an unfinished label edit's owner. Finish that edit before changing this history step.".into(),
+                        ));
+                    }
+                    candidate.editing = Some(draft);
+                }
+                if changing_history && let Some(draft) = candidate.details.as_mut() {
+                    let node = candidate.document.nodes.get(&draft.id).ok_or_else(|| {
+                        EditorError::State("Undo/redo would remove an unfinished notes edit's owner. Finish that edit before changing this history step.".into())
+                    })?;
+                    let (clean_notes, clean_link) = clean_details.expect("validated details owner");
+                    let mut changed = false;
+                    if clean_notes && draft.notes != node.notes {
+                        draft.notes.clone_from(&node.notes);
+                        changed = true;
+                    }
+                    if clean_link && draft.link != node.link {
+                        draft.link.clone_from(&node.link);
+                        changed = true;
+                    }
+                    if changed {
+                        candidate.draft_revision = candidate.draft_revision.wrapping_add(1);
+                    }
+                }
+                if changing_history && candidate.effective_text_bytes()? > MAX_TEXT_BYTES {
+                    return Err(EditorError::State(
+                        "Undo/redo exceeds the decoded-text limit with unfinished edits. Finish those edits first.".into(),
+                    ));
                 }
             }
             EditorEdit::Key(key) => {
@@ -418,6 +460,23 @@ impl Editor {
                     link: node.link.clone(),
                 });
                 candidate.draft_revision = candidate.draft_revision.wrapping_add(1);
+            }
+            EditorEdit::ApplyNotes { id, notes } => {
+                candidate.execute(Command::SetNotes {
+                    id: id.clone(),
+                    notes: notes.clone(),
+                })?;
+                if let Some(draft) = candidate.details.as_mut().filter(|draft| &draft.id == id)
+                    && draft.notes != *notes
+                {
+                    draft.notes = notes.clone();
+                    candidate.draft_revision = candidate.draft_revision.wrapping_add(1);
+                }
+                if candidate.effective_text_bytes()? > MAX_TEXT_BYTES {
+                    return Err(EditorError::State(
+                        "Notes exceed the decoded-text limit with unfinished edits; the previous notes were retained.".into(),
+                    ));
+                }
             }
             EditorEdit::FlushDetails => candidate.flush_details()?,
             EditorEdit::CommitDrafts => {

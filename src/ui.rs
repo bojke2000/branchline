@@ -36,6 +36,7 @@ enum CanvasDrag {
 }
 
 enum Dialog {
+    Notes(notes::NotesPopup),
     Rename {
         session: SessionId,
         name: String,
@@ -63,6 +64,9 @@ mod canvas_tools;
 mod details;
 #[cfg(test)]
 mod mermaid_tests;
+mod notes;
+#[cfg(test)]
+mod notes_tests;
 mod paste;
 mod recovery;
 #[cfg(test)]
@@ -96,6 +100,7 @@ pub struct NativeApp {
     palette_focus: bool,
     help_open: bool,
     edit_focus: Option<NodeId>,
+    notes_focus: Option<(SessionId, NodeId)>,
     composing: Option<Id>,
     drag: Option<CanvasDrag>,
     allow_close: bool,
@@ -142,6 +147,7 @@ impl NativeApp {
             palette_focus: false,
             help_open: false,
             edit_focus: None,
+            notes_focus: None,
             composing: None,
             drag: None,
             allow_close: false,
@@ -278,6 +284,7 @@ impl NativeApp {
                 }
                 self.workspace.map_mut().notes_open = !self.workspace.map().notes_open;
             }
+            AppCommand::EditNotes => self.open_notes(),
             AppCommand::Fit => self.fit_requested = true,
             AppCommand::Focus => {
                 if let Some(rect) = self.placed.nodes.get(&self.workspace.map().editor.selected) {
@@ -402,6 +409,7 @@ impl NativeApp {
                 AppCommand::AddChild,
                 AppCommand::AddSibling,
                 AppCommand::Edit,
+                AppCommand::EditNotes,
                 AppCommand::Fold,
                 AppCommand::FocusBranch,
                 AppCommand::ShowFullMap,
@@ -695,6 +703,8 @@ impl NativeApp {
             )
             .show(root_ui, |ui| self.toolbar(ui, blocked));
         self.tab_strip(root_ui, blocked);
+        let text_overlay = self.palette_open
+            || matches!(self.dialog, Some(Dialog::Rename { .. } | Dialog::Notes(_)));
         let overlay_events = if self.palette_open || self.dialog.is_some() {
             ctx.input_mut(|input| {
                 let (text, other) = std::mem::take(&mut input.events)
@@ -707,7 +717,7 @@ impl NativeApp {
                                 | egui::Event::Copy
                                 | egui::Event::Cut
                                 | egui::Event::Ime(_)
-                        )
+                        ) || (text_overlay && matches!(event, egui::Event::Key { .. }))
                     });
                 input.events = other;
                 text
@@ -767,11 +777,36 @@ impl NativeApp {
                 self.canvas(ui)
             });
         });
-        if self.palette_open || matches!(self.dialog, Some(Dialog::Rename { .. })) {
+        if text_overlay {
             ctx.input_mut(|input| input.events.extend(overlay_events));
         }
         if !blocked {
             self.palette(&ctx);
+        }
+        if self.dialog.is_none()
+            && let Some((session, target)) = self.notes_focus.take()
+            && session == self.workspace.active_id()
+            && self
+                .workspace
+                .map()
+                .editor
+                .document
+                .nodes
+                .contains_key(&target)
+        {
+            let kind = if self
+                .workspace
+                .map()
+                .editor
+                .editing
+                .as_ref()
+                .is_some_and(|draft| draft.id == target)
+            {
+                "inline"
+            } else {
+                "idea"
+            };
+            ctx.memory_mut(|memory| memory.request_focus(Id::unique((kind, session, &target))));
         }
         self.dialogs(&ctx);
         if self.workspace.active().is_err() {
@@ -1995,6 +2030,9 @@ impl NativeApp {
         egui::Modal::new(Id::unique("file-dialog")).show(ctx, |ui| {
             ui.set_width(470.0);
             match &mut dialog {
+                Dialog::Notes(popup) => {
+                    keep = self.notes_dialog(ui, popup);
+                }
                 Dialog::Rename { session, name, focus } => {
                     keep = self.rename_dialog(ui, *session, name, focus);
                 }

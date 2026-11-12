@@ -186,6 +186,20 @@ branch. Search or navigation to an outside topic, or deleting the focused branch
 returns to the full map. Branch focus is temporary; restarting restores the full
 map's view.
 
+### Quick notes
+
+Right-click a topic and choose **Notes...** to edit its notes in a popup without
+moving the canvas or opening the sidebar. Select text and click **Bold**, or use
+**Bullet list** on the current line or selected lines. This is a simple Markdown
+source editor, not a WYSIWYG editor. A compact, stable-height popup gives the
+available space to the input box, with scrolling for longer notes.
+
+**Apply** or **Cmd/Ctrl+Enter** saves the notes as one undoable edit.
+**Cancel** or **Escape** discards only the popup's changes. Existing unfinished
+labels, other notes and link edits stay intact. The sidebar remains a plain-text
+editor of the same notes, and the native file format is unchanged: Markdown is
+stored as text.
+
 ### Hierarchical clipboard
 
 Physical Ctrl and Cmd both work for A/C/V on macOS. Text fields keep their
