@@ -78,6 +78,8 @@ jobs:
           sh scripts/bundle.sh
           test "$(lipo -archs target/bundle/BMM.app/Contents/MacOS/BMM)" = "$ARCH"
           test "$(plutil -extract CFBundleShortVersionString raw target/bundle/BMM.app/Contents/Info.plist)" = "$VERSION"
+          # The local ownership marker is outside the sealable Contents directory.
+          rm target/bundle/BMM.app/.branchline-local-build
           codesign --force --deep --sign - target/bundle/BMM.app
           codesign --verify --deep --strict target/bundle/BMM.app
           mkdir -p dist
