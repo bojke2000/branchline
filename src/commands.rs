@@ -247,7 +247,7 @@ impl AppCommand {
             Search => ("Search ideas", "Cmd/Ctrl+F", Some(Command(Key::F))),
             Palette => ("Command palette", "Cmd/Ctrl+K", Some(Command(Key::K))),
             Notes => ("Show / hide notes", "", None),
-            EditNotes => ("Notes...", "", None),
+            EditNotes => ("Notes...", "F3", Some(Plain(Key::F3))),
             Fit => ("Fit map", "", None),
             Focus => ("Focus selection", "", None),
             FocusBranch => ("Focus branch", "", None),

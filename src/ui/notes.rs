@@ -98,6 +98,8 @@ impl NativeApp {
             selection = Some(range);
         }
         let height = (viewport.height() * 0.336).clamp(126.0, 308.0);
+        let mut font = egui::FontSelection::Default.resolve(ui.style());
+        font.size += 1.0;
         let output = egui::ScrollArea::vertical()
             .id_salt("notes-source-scroll")
             .max_height(height)
@@ -105,6 +107,7 @@ impl NativeApp {
             .show(ui, |ui| {
                 egui::TextEdit::multiline(&mut popup.text)
                     .id(id)
+                    .font(font)
                     .min_size(egui::vec2(0.0, height))
                     .desired_width(f32::INFINITY)
                     .char_limit(DRAFT_CHAR_PROBE_LIMIT)

@@ -132,6 +132,26 @@ fn fixture() -> (tempfile::TempDir, NativeApp, NodeId, NodeId) {
 }
 
 #[test]
+fn f3_opens_selected_topic_notes_without_intercepting_text_editing() {
+    let (_temp, mut app, _root, target) = fixture();
+    let ctx = egui::Context::default();
+    frame(&mut app, &ctx, vec![]);
+    key(&mut app, &ctx, Key::F3, egui::Modifiers::NONE);
+    assert!(matches!(app.dialog, Some(Dialog::Notes(_))));
+    position(&frame(&mut app, &ctx, vec![]), "Existing notes");
+    key(&mut app, &ctx, Key::Escape, egui::Modifiers::NONE);
+    frame(&mut app, &ctx, vec![]);
+    app.action(EditorAction::Edit);
+    frame(&mut app, &ctx, vec![]);
+    key(&mut app, &ctx, Key::F3, egui::Modifiers::NONE);
+    assert!(app.dialog.is_none());
+    assert_eq!(
+        app.workspace.map().editor.editing.as_ref().unwrap().id,
+        target
+    );
+}
+
+#[test]
 fn notes_popup_stays_in_place_when_typing_and_scrolling_long_notes() {
     for size in [egui::vec2(1280.0, 840.0), egui::vec2(850.0, 560.0)] {
         let (_temp, mut app, _root, _target) = fixture();
