@@ -27,6 +27,66 @@ fn titles(output: &egui::FullOutput) -> Vec<String> {
 }
 
 #[test]
+fn root_renders_as_a_compact_pill_that_fits_its_label() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app =
+        NativeApp::new(RecoveryCoordinator::open(temp.path().join("recovery")).unwrap()).unwrap();
+    let context = egui::Context::default();
+    let root = app.workspace.map().editor.document.root.clone();
+    for label in [
+        "Idea",
+        "CrmNextGen",
+        "A longer central idea that needs room to wrap onto more than one line",
+        "First line\nSecond line\nThird line",
+    ] {
+        app.edit(EditorEdit::Command(Command::SetText {
+            id: root.clone(),
+            text: label.into(),
+        }))
+        .unwrap();
+        let output = frame(&mut app, &context);
+        let bounds = app.placed.nodes[&root];
+        if label == "Idea" {
+            assert!(
+                bounds.max.x - bounds.min.x < 190.0,
+                "short roots should be compact"
+            );
+        }
+        let text = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == label => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        let center = text.pos + text.galley.size() * 0.5;
+        assert_eq!(
+            app.galleys[&root].job.sections[0].format.font_id,
+            FontId::new(17.0, egui::FontFamily::Name("root-bold".into()))
+        );
+        let pill = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.center().distance(center) < 1.0
+                        && rect.stroke.color == Color32::from_rgb(128, 48, 255) =>
+                {
+                    Some(rect)
+                }
+                _ => None,
+            })
+            .expect("root should have a purple rounded-rectangle outline");
+        assert!(pill.corner_radius.nw > 2);
+        assert!(
+            pill.rect
+                .contains_rect(egui::Rect::from_min_size(text.pos, text.galley.size(),))
+        );
+    }
+}
+
+#[test]
 fn idle_frames_do_not_republish_the_title_or_request_continuous_repaints() {
     let temp = tempfile::tempdir().unwrap();
     let mut app =

@@ -90,11 +90,12 @@ fn bmm_defaults_to_dark_mode_even_on_a_light_host() {
         "The editor canvas must start dark, independently of host theme"
     );
     assert!(
-        shapes
-            .iter()
-            .any(|shape| matches!(shape, Shape::Ellipse(ellipse)
-        if ellipse.radius.x > ellipse.radius.y && ellipse.fill == Color32::from_rgb(22, 25, 33))),
-        "The central topic must be an outlined oval"
+        shapes.iter().any(|shape| matches!(shape, Shape::Rect(rect)
+        if rect.rect.width() > rect.rect.height()
+            && rect.corner_radius.nw > 2
+            && rect.stroke.color == Color32::from_rgb(128, 48, 255)
+            && rect.fill == Color32::from_rgb(22, 25, 33))),
+        "The central topic must be an outlined pill"
     );
     assert!(
         text_center(&shapes, "BMM").is_some(),

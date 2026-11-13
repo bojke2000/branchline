@@ -688,6 +688,19 @@ impl NativeApp {
             return;
         }
         if !self.theme_initialized {
+            let mut fonts = ctx.fonts(|fonts| fonts.definitions().clone());
+            fonts.font_data.insert(
+                "Ubuntu-Bold".into(),
+                Arc::new(egui::FontData::from_static(include_bytes!(
+                    "../assets/fonts/Ubuntu-Bold.ttf"
+                ))),
+            );
+            let mut family = fonts.families[&egui::FontFamily::Proportional].clone();
+            family.insert(0, "Ubuntu-Bold".into());
+            fonts
+                .families
+                .insert(egui::FontFamily::Name("root-bold".into()), family);
+            ctx.set_fonts(fonts);
             ctx.set_theme(egui::Theme::Dark);
             root_ui.style_mut().visuals = egui::Visuals::dark();
             self.theme_initialized = true;
@@ -1321,7 +1334,11 @@ impl NativeApp {
                 let root = id == &self.workspace.map().editor.document.root;
                 let galley = ui.painter().layout(
                     node.text.clone(),
-                    FontId::proportional(if root { 24.0 } else { 18.0 }),
+                    if root {
+                        FontId::new(17.0, egui::FontFamily::Name("root-bold".into()))
+                    } else {
+                        FontId::proportional(18.0)
+                    },
                     if dark {
                         Color32::from_gray(240)
                     } else {
@@ -1332,7 +1349,7 @@ impl NativeApp {
                 sizes.insert(
                     id.clone(),
                     Size {
-                        width: (galley.size().x + 44.0).max(if root { 190.0 } else { 110.0 }),
+                        width: (galley.size().x + 44.0).max(if root { 160.0 } else { 110.0 }),
                         height: (galley.size().y + 18.0).max(40.0),
                     },
                 );
@@ -1499,13 +1516,16 @@ impl NativeApp {
             };
             let root = id == self.workspace.map().editor.document.root;
             if root {
-                ui.painter().add(egui::epaint::EllipseShape {
-                    center: rect.center(),
-                    radius: rect.size() * 0.5,
-                    angle: 0.0,
-                    fill: background,
-                    stroke: Stroke::new(1.4, Color32::from_gray(if dark { 155 } else { 140 })),
-                });
+                ui.painter().rect(
+                    rect,
+                    (rect.height() * 0.5).min(24.0 * self.workspace.map().viewport.zoom),
+                    background,
+                    Stroke::new(
+                        2.0 * self.workspace.map().viewport.zoom,
+                        Color32::from_rgb(128, 48, 255),
+                    ),
+                    egui::StrokeKind::Inside,
+                );
             }
             if selected {
                 let highlight = if root {
