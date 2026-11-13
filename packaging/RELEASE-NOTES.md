@@ -1,13 +1,13 @@
-First BMM desktop release: a local-first, keyboard-driven mind mapper.
+BMM v0.1.1: a local-first, keyboard-driven mind mapper.
 
 ## Downloads
 
 | Platform | Download |
 | --- | --- |
-| macOS 11+, Apple Silicon | `BMM-0.1.0-macos-arm64.zip` |
-| macOS 11+, Intel | `BMM-0.1.0-macos-x86_64.zip` |
-| Windows 10/11, x64 | `BMM-0.1.0-windows-x86_64.zip` |
-| Debian 12+ / Ubuntu 22.04+, amd64 | `bmm_0.1.0_amd64.deb` |
+| macOS 11+, Apple Silicon | `BMM-0.1.1-macos-arm64.zip` |
+| macOS 11+, Intel | `BMM-0.1.1-macos-x86_64.zip` |
+| Windows 10/11, x64 | `BMM-0.1.1-windows-x86_64.zip` |
+| Debian 12+ / Ubuntu 22.04+, amd64 | `bmm_0.1.1_amd64.deb` |
 
 **macOS:** unzip, move `BMM.app` to Applications, then open it. This build is
 ad-hoc signed, **not Developer ID signed or notarized**. Gatekeeper may block it.
@@ -17,7 +17,7 @@ If you trust the download, follow Apple's Open Anyway option in System Settings
 **Windows:** extract the ZIP and open `BMM.exe`. It is a portable application,
 not an installer. It is not Authenticode signed; SmartScreen may show a warning.
 
-**Debian/Ubuntu:** install with `sudo apt install ./bmm_0.1.0_amd64.deb`.
+**Debian/Ubuntu:** install with `sudo apt install ./bmm_0.1.1_amd64.deb`.
 Launch BMM from the application menu or run `bmm` in a graphical desktop session.
 The package is built on Ubuntu 22.04 for its older glibc baseline and
 install-checked on Debian 12, Ubuntu 22.04 and Ubuntu 24.04.
@@ -28,6 +28,7 @@ These checksums are not a publisher signature.
 
 ## Included
 
+- Refined compact pill styling for the central root.
 - Two-sided automatic layout, inline editing, folding and undo/redo.
 - Multiple map tabs, underlying-file rename, native saves and local recovery.
 - Multi-node dragging, rectangle selection and per-tab branch focus.
