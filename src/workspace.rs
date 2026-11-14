@@ -479,7 +479,7 @@ impl Workspace {
         let restore = crate::recovery::WorkspaceRestore {
             active: Some(id),
             sessions: vec![restored],
-            warnings: vec![],
+            ..Default::default()
         };
         let mut loaded = Self::from_restore(restore, true)?;
         let entry = loaded.entries.remove(&id).ok_or_else(|| {

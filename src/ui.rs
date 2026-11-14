@@ -84,6 +84,7 @@ pub struct NativeApp {
     store: RecoveryCoordinator,
     dialog: Option<Dialog>,
     error: Option<String>,
+    recovery_warnings: recovery::RecoveryWarnings,
     status: String,
     window_title: String,
     placed: Layout,
@@ -123,7 +124,22 @@ impl NativeApp {
         mut store: RecoveryCoordinator,
         clipboard: Box<dyn crate::clipboard::OutlineClipboard>,
     ) -> Result<Self, StorageError> {
-        let restore = store.load()?;
+        let mut restore = store.load()?;
+        let mut recovery_warnings = recovery::RecoveryWarnings::new(
+            store
+                .preferences_path()
+                .with_file_name("dismissed-recovery-warnings.json"),
+        );
+        if let Err(error) = recovery_warnings.load() {
+            restore.warnings.push(format!(
+                "Could not restore recovery warning dismissals: {error}"
+            ));
+        }
+        if let Some(cause) = restore.cleanup_error.take()
+            && let Some(message) = recovery_warnings.notice(cause)
+        {
+            restore.warnings.push(message);
+        }
         let mut notices = restore.warnings.join("\n");
         let notes_font_size = match notes::load_font_size(&store.preferences_path()) {
             Ok(size) => size,
@@ -142,6 +158,7 @@ impl NativeApp {
             store,
             dialog: None,
             error: (!notices.is_empty()).then_some(notices),
+            recovery_warnings,
             status: "Local by design. Your ideas stay on this computer.".into(),
             window_title: String::new(),
             placed: Layout::default(),
@@ -193,10 +210,10 @@ impl NativeApp {
 
     pub fn checkpoint_recovery(&mut self) -> Result<(), EditorError> {
         let publication = self.store.publish(&self.workspace.recovery_state())?;
-        if let Some(cause) = publication.cleanup_error {
-            self.error = Some(format!(
-                "Workspace recovery was published; snapshot cleanup remains pending: {cause}"
-            ));
+        if let Some(cause) = publication.cleanup_error
+            && let Some(message) = self.recovery_warnings.notice(cause)
+        {
+            self.error = Some(message);
         }
         Ok(())
     }
@@ -780,7 +797,7 @@ impl NativeApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.colored_label(Color32::from_rgb(210, 75, 70), error);
                     if ui.small_button("Dismiss").clicked() {
-                        self.error = None;
+                        self.dismiss_error();
                     }
                 });
             } else {
@@ -1608,6 +1625,14 @@ impl NativeApp {
                     edit_rect,
                     egui::TextEdit::multiline(&mut text)
                         .id(inline_id)
+                        .return_key(egui::KeyboardShortcut::new(
+                            if cfg!(target_os = "macos") {
+                                egui::Modifiers::MAC_CMD
+                            } else {
+                                egui::Modifiers::ALT
+                            },
+                            Key::Enter,
+                        ))
                         .font(FontId::proportional(18.0 * zoom))
                         .desired_rows(edit_rows)
                         .desired_width(edit_rect.width())

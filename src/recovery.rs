@@ -278,6 +278,7 @@ pub struct WorkspaceRestore {
     pub active: Option<SessionId>,
     pub sessions: Vec<RestoredSession>,
     pub warnings: Vec<String>,
+    pub cleanup_error: Option<StorageError>,
 }
 
 pub struct Publication {
@@ -461,7 +462,7 @@ impl RecoveryCoordinator {
             }
         }
         if !manifest.cleanup.is_empty() {
-            restore.warnings.push("Snapshot cleanup is pending; owned files will be retried without deleting replacements.".into());
+            restore.cleanup_error = self.retry_cleanup().err();
         }
         let mut retained_bytes = 0usize;
         for tab in manifest.tabs {

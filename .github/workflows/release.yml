@@ -71,7 +71,9 @@ jobs:
             target
           key: release-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
       - name: Test release behavior
-        run: cargo test --release --locked --lib --test editor --test workspace --test tabs_ui --test clipboard_ui
+        run: |
+          cargo test --release --locked --lib --test editor --test workspace --test tabs_ui --test clipboard_ui
+          cargo test --release --locked --test bmm_ui platform_line_break_shortcut_keeps_node_text_multiline
       - name: Build and verify app bundle
         run: |
           set -euo pipefail
@@ -111,7 +113,9 @@ jobs:
             target
           key: release-${{ runner.os }}-x86_64-crt-static-${{ hashFiles('Cargo.lock') }}
       - name: Test release behavior
-        run: cargo test --release --locked --lib --test editor --test workspace --test tabs_ui --test clipboard_ui --test document
+        run: |
+          cargo test --release --locked --lib --test editor --test workspace --test tabs_ui --test clipboard_ui --test document
+          cargo test --release --locked --test bmm_ui platform_line_break_shortcut_keeps_node_text_multiline
       - name: Build executable
         run: cargo build --release --locked
       - name: Package and verify portable application
@@ -166,7 +170,9 @@ jobs:
             target
           key: release-${{ runner.os }}-ubuntu22-x86_64-${{ hashFiles('Cargo.lock') }}
       - name: Test release behavior
-        run: cargo test --release --locked --lib --test editor --test workspace --test tabs_ui --test clipboard_ui --test document
+        run: |
+          cargo test --release --locked --lib --test editor --test workspace --test tabs_ui --test clipboard_ui --test document
+          cargo test --release --locked --test bmm_ui platform_line_break_shortcut_keeps_node_text_multiline
       - name: Build and package
         run: |
           cargo build --release --locked

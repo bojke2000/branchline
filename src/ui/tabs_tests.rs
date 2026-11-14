@@ -172,6 +172,147 @@ fn click(app: &mut NativeApp, ctx: &egui::Context, pos: Pos2, button: egui::Poin
     }
 }
 
+fn replace_recovery_snapshot(directory: &std::path::Path) -> PathBuf {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.join("workspace.json")).unwrap()).unwrap();
+    let id = manifest["tabs"][0]["snapshot"]["id"].as_str().unwrap();
+    let path = directory.join(format!("snapshot-{id}.json"));
+    std::fs::rename(&path, path.with_extension("held")).unwrap();
+    std::fs::write(&path, b"foreign replacement").unwrap();
+    path
+}
+
+fn edit_recovery_text(app: &mut NativeApp, text: &str) {
+    let root = app.workspace.map().editor.document.root.clone();
+    app.edit(EditorEdit::Command(Command::SetText {
+        id: root,
+        text: text.into(),
+    }))
+    .unwrap();
+    app.checkpoint_recovery().unwrap();
+}
+
+fn dismiss_visible_error(app: &mut NativeApp) {
+    let ctx = egui::Context::default();
+    frame(app, &ctx, vec![]);
+    let output = frame(app, &ctx, vec![]);
+    let dismiss = text_position(&output, "Dismiss");
+    click(app, &ctx, dismiss, egui::PointerButton::Primary);
+}
+
+#[test]
+fn dismissed_cleanup_warning_stays_hidden_after_checkpoints_and_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    edit_recovery_text(&mut app, "Original");
+    let replacement = replace_recovery_snapshot(temp.path());
+    edit_recovery_text(&mut app, "Current");
+    assert!(app.error.as_ref().unwrap().contains("identity changed"));
+    dismiss_visible_error(&mut app);
+    assert!(app.error.is_none());
+    edit_recovery_text(&mut app, "Next edit");
+    assert!(app.error.is_none(), "dismissed cleanup warning returned");
+    drop(app);
+
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    assert!(app.error.is_none(), "dismissal did not survive restart");
+    edit_recovery_text(&mut app, "After restart");
+    assert!(app.error.is_none());
+    assert_eq!(std::fs::read(replacement).unwrap(), b"foreign replacement");
+    app.error = Some("An unrelated error".into());
+    app.checkpoint_recovery().unwrap();
+    assert_eq!(app.error.as_deref(), Some("An unrelated error"));
+
+    let new_replacement = replace_recovery_snapshot(temp.path());
+    edit_recovery_text(&mut app, "New cleanup failure");
+    assert!(
+        app.error
+            .as_ref()
+            .unwrap()
+            .contains(new_replacement.to_str().unwrap()),
+        "new cleanup failures must still be shown"
+    );
+    drop(app);
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    assert!(
+        app.error
+            .as_ref()
+            .unwrap()
+            .contains(new_replacement.to_str().unwrap())
+    );
+    dismiss_visible_error(&mut app);
+    drop(app);
+    let app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    assert!(
+        app.error.is_none(),
+        "startup warnings must be dismissible too"
+    );
+}
+
+#[test]
+fn dismissing_cleanup_warning_does_not_disable_cleanup_retries() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    edit_recovery_text(&mut app, "Original");
+    let replacement = replace_recovery_snapshot(temp.path());
+    edit_recovery_text(&mut app, "Current");
+    dismiss_visible_error(&mut app);
+    std::fs::remove_file(&replacement).unwrap();
+    std::fs::rename(replacement.with_extension("held"), &replacement).unwrap();
+    app.checkpoint_recovery().unwrap();
+    assert!(!replacement.exists(), "dismissal must not skip cleanup");
+    assert!(app.error.is_none());
+}
+
+#[test]
+fn cleanup_warning_dismissal_reports_persistence_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    edit_recovery_text(&mut app, "Original");
+    replace_recovery_snapshot(temp.path());
+    edit_recovery_text(&mut app, "Current");
+    std::fs::create_dir(temp.path().join("dismissed-recovery-warnings.json")).unwrap();
+    dismiss_visible_error(&mut app);
+    let error = app
+        .error
+        .as_ref()
+        .expect("failed dismissal must be reported");
+    assert!(error.contains("Could not remember recovery warning dismissal"));
+    app.checkpoint_recovery().unwrap();
+    assert!(
+        app.error.is_some(),
+        "failed persistence must not mute warnings"
+    );
+}
+
+#[test]
+fn dismissed_cleanup_warnings_stay_hidden_when_only_one_failure_remains() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    edit_recovery_text(&mut app, "First");
+    let first = replace_recovery_snapshot(temp.path());
+    edit_recovery_text(&mut app, "Second");
+    let second = replace_recovery_snapshot(temp.path());
+    edit_recovery_text(&mut app, "Third");
+    let error = app.error.as_ref().unwrap();
+    assert!(error.contains(first.to_str().unwrap()));
+    assert!(error.contains(second.to_str().unwrap()));
+    dismiss_visible_error(&mut app);
+
+    std::fs::remove_file(&second).unwrap();
+    std::fs::rename(second.with_extension("held"), &second).unwrap();
+    app.checkpoint_recovery().unwrap();
+    assert!(
+        app.error.is_none(),
+        "a previously dismissed failure returned"
+    );
+    assert!(!second.exists(), "resolved cleanup must still complete");
+    drop(app);
+    let app = NativeApp::new(RecoveryCoordinator::open(temp.path().into()).unwrap()).unwrap();
+    assert!(app.error.is_none());
+    assert_eq!(std::fs::read(first).unwrap(), b"foreign replacement");
+}
+
 #[test]
 fn rename_conflict_surfaces_error_without_changing_the_tab() {
     let temp = tempfile::tempdir().unwrap();

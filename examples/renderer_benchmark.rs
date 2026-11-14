@@ -144,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
     let completed = Rc::new(Cell::new(false));
-    let mut benchmark = Benchmark {
+    let benchmark = Benchmark {
         app,
         frames: 0,
         previous: None,
@@ -161,6 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_inner_size([1280.0, 840.0]);
     #[cfg(windows)]
     if renderer == "software" {
+        let mut benchmark = benchmark;
         let context = egui::Context::default();
         desktop::configure_context(&context);
         desktop::software::run(context, viewport, |ui| benchmark.show(ui))?;

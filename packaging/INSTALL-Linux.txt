@@ -1,7 +1,7 @@
 BMM for Debian 12+ and Ubuntu 22.04+ (amd64)
 
 Install the downloaded package with apt so runtime dependencies are installed:
-  sudo apt install ./bmm_0.1.0_amd64.deb
+  sudo apt install ./bmm_0.1.3_amd64.deb
 
 Start BMM from your application menu or run:
   bmm

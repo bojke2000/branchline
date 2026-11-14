@@ -1,13 +1,22 @@
-BMM v0.1.2: a local-first, keyboard-driven mind mapper.
+BMM v0.1.3: persistent recovery-warning dismissal and inline editing fixes.
+
+## Changes
+
+- Dismissed snapshot-cleanup warnings stay hidden across edits and app restarts.
+- Cleanup continues safely; new failures are still reported, and resolving one
+  failure does not bring back other dismissed warnings.
+- Cmd+Enter on macOS and Alt+Enter on Windows/Linux insert line breaks while
+  editing node text. Plain Enter still commits the edit.
+- Fixed a platform-specific renderer benchmark lint error.
 
 ## Downloads
 
 | Platform | Download |
 | --- | --- |
-| macOS 11+, Apple Silicon | `BMM-0.1.2-macos-arm64.zip` |
-| macOS 11+, Intel | `BMM-0.1.2-macos-x86_64.zip` |
-| Windows 10/11, x64 | `BMM-0.1.2-windows-x86_64.zip` |
-| Debian 12+ / Ubuntu 22.04+, amd64 | `bmm_0.1.2_amd64.deb` |
+| macOS 11+, Apple Silicon | `BMM-0.1.3-macos-arm64.zip` |
+| macOS 11+, Intel | `BMM-0.1.3-macos-x86_64.zip` |
+| Windows 10/11, x64 | `BMM-0.1.3-windows-x86_64.zip` |
+| Debian 12+ / Ubuntu 22.04+, amd64 | `bmm_0.1.3_amd64.deb` |
 
 **macOS:** unzip, move `BMM.app` to Applications, then open it. This build is
 ad-hoc signed, **not Developer ID signed or notarized**. Gatekeeper may block it.
@@ -17,7 +26,7 @@ If you trust the download, follow Apple's Open Anyway option in System Settings
 **Windows:** extract the ZIP and open `BMM.exe`. It is a portable application,
 not an installer. It is not Authenticode signed; SmartScreen may show a warning.
 
-**Debian/Ubuntu:** install with `sudo apt install ./bmm_0.1.2_amd64.deb`.
+**Debian/Ubuntu:** install with `sudo apt install ./bmm_0.1.3_amd64.deb`.
 Launch BMM from the application menu or run `bmm` in a graphical desktop session.
 The package is built on Ubuntu 22.04 for its older glibc baseline and
 install-checked on Debian 12, Ubuntu 22.04 and Ubuntu 24.04.
@@ -42,10 +51,10 @@ storage location. Close existing instances before running this release.
 
 ## Verification and limitations
 
-Native release tests run for both macOS architectures, Windows and Linux.
+Native release tests run for both macOS architectures, Windows and Linux,
+including recovery-warning dismissal and the inline-label multiline shortcut.
 Packages are checked without launching a GUI. Native desktop, GPU, clipboard,
 accessibility and IME behavior still need manual platform testing.
 
 This early release is not Freeplane feature parity. Outline copy/paste does not
-preserve notes, links or folding. A pre-existing macOS inline-label multiline
-shortcut regression is not included in the targeted release test suite.
+preserve notes, links or folding.

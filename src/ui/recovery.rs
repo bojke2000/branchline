@@ -1,6 +1,83 @@
 use super::*;
+use std::{collections::BTreeSet, path::PathBuf};
+
+pub(super) struct RecoveryWarnings {
+    path: PathBuf,
+    dismissed: BTreeSet<String>,
+    current: Option<String>,
+}
+
+fn cleanup_message(cause: &str) -> String {
+    format!("Workspace recovery was published; snapshot cleanup remains pending: {cause}")
+}
+
+impl RecoveryWarnings {
+    pub(super) fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            dismissed: BTreeSet::new(),
+            current: None,
+        }
+    }
+
+    pub(super) fn load(&mut self) -> Result<(), StorageError> {
+        match std::fs::symlink_metadata(&self.path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(StorageError(format!("{}: {error}", self.path.display())));
+            }
+            Ok(_) => {}
+        }
+        self.dismissed = serde_json::from_slice(&read_bounded(&self.path)?)
+            .map_err(|error| StorageError(format!("{}: {error}", self.path.display())))?;
+        Ok(())
+    }
+
+    pub(super) fn notice(&mut self, cause: StorageError) -> Option<String> {
+        let cause = cause
+            .to_string()
+            .lines()
+            .filter(|cause| !self.dismissed.contains(*cause))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if cause.is_empty() {
+            return None;
+        }
+        let message = cleanup_message(&cause);
+        self.current = Some(cause);
+        Some(message)
+    }
+
+    fn dismiss(&mut self, visible: &str) -> Result<(), StorageError> {
+        if let Some(cause) = &self.current
+            && visible.contains(&cleanup_message(cause))
+        {
+            let mut dismissed = self.dismissed.clone();
+            dismissed.extend(cause.lines().map(str::to_owned));
+            let bytes = crate::storage::serialize_bounded(&dismissed)?;
+            atomic_write(&self.path, &bytes)?;
+            self.dismissed = dismissed;
+        }
+        self.current = None;
+        Ok(())
+    }
+}
 
 impl NativeApp {
+    pub(super) fn dismiss_error(&mut self) {
+        let Some(error) = &self.error else {
+            return;
+        };
+        match self.recovery_warnings.dismiss(error) {
+            Ok(()) => self.error = None,
+            Err(cause) => {
+                self.error = Some(format!(
+                    "{error}\nCould not remember recovery warning dismissal: {cause}"
+                ));
+            }
+        }
+    }
+
     pub(super) fn debounce_recovery(&mut self, ctx: &egui::Context) {
         if !self.allow_close
             && self.dialog.is_none()
